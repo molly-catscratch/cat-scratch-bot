@@ -1,0 +1,101 @@
+[
+  {
+    "type": "capacity",
+    "text": "**Daily Bandwidth Check** ₍^. .^₎⟆\nHow's everyone's capacity looking today?\n\nUse the reactions below to share your current workload:\n🟢 Light schedule - Ready for new work\n🟡 Manageable schedule\n🟠 Schedule is full, no new work\n🔴 Overloaded - Need help now",
+    "userModifiedText": false,
+    "scheduleType": "schedule",
+    "channel": "C09AESH60SV",
+    "date": "2025-08-22",
+    "time": "09:00",
+    "repeat": "daily",
+    "id": "msg_1755828868664_47169"
+  },
+  {
+    "type": "help",
+    "text": "**Need Backup?** ₍^. .^₎⟆\nIf you're stuck or need assistance, click the button below to alert the team.",
+    "userModifiedText": false,
+    "scheduleType": "schedule",
+    "channel": "C09AESH60SV",
+    "date": "2025-08-22",
+    "time": "12:00",
+    "repeat": "daily",
+    "alertChannels": [
+      "C09A6TF9142"
+    ],
+    "id": "msg_1755828900986_41500"
+  },
+  {
+    "type": "help",
+    "text": "**Need Backup?** ₍^. .^₎⟆\nIf you're stuck or need assistance, click the button below to alert the team.",
+    "userModifiedText": false,
+    "alertChannels": [
+      "C099W85TTLK"
+    ],
+    "scheduleType": "schedule",
+    "channel": "C099PSFG93R",
+    "date": "2025-08-22",
+    "time": "12:00",
+    "repeat": "daily",
+    "id": "msg_1755872549592_3820"
+  },
+  {
+    "type": "poll",
+    "text": "@channel what is your priority for the team tomorrow?",
+    "title": "",
+    "pollType": "open",
+    "pollOptions": "",
+    "pollSettings": [],
+    "scheduleType": "schedule",
+    "userModifiedText": "",
+    "channel": "C099W85TTLK",
+    "date": "2025-08-22",
+    "time": "16:00",
+    "repeat": "daily",
+    "id": "msg_1755872593108_82947"
+  },
+  {
+    "type": "help",
+    "text": "**Need Backup?** ₍^. .^₎⟆\nIf you're stuck or need assistance, click the button below to alert the team.",
+    "alertChannels": [
+      "C09A6TF9142"
+    ],
+    "scheduleType": "schedule",
+    "channel": "C09AESH60SV",
+    "date": "2025-08-26",
+    "time": "13:00",
+    "repeat": "daily",
+    "id": "msg_1756223708224_19691"
+  },
+  {
+    "channel": "C09AESH60SV",
+    "scheduleType": "schedule",
+    "date": "2025-08-26",
+    "time": "13:00",
+    "repeat": "daily",
+    "id": "msg_1756223709486_55827"
+  },
+  {
+    "id": "msg_1757536278854_16830",
+    "text": "If you're stuck or need assistance, click the button below to alert the team.",
+    "title": "",
+    "channel": "C09A257SGNN",
+    "date": "2025-09-11",
+    "time": "09:00",
+    "repeat": "none",
+    "alertChannels": [
+      "C09A257SGNN"
+    ],
+    "type": "help_button"
+  },
+  {
+    "id": "msg_1757536323112_85546",
+    "text": "test",
+    "title": "test",
+    "channel": "C09A257SGNN",
+    "date": "2025-09-11",
+    "time": "09:00",
+    "repeat": "none",
+    "alertChannels": [],
+    "type": "custom"
+  }
+]
