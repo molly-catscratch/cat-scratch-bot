@@ -1,5 +1,5 @@
 // ================================
-// CAT SCRATCH SLACK BOT - FIXED VERSION WITH PROPER NAVIGATION
+// CAT SCRATCH SLACK BOT - OFFICIAL SLACK API COMPLIANT VERSION
 // ================================
 
 const { App } = require('@slack/bolt');
@@ -67,7 +67,6 @@ const app = new App({
   appToken: process.env.SLACK_APP_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
   socketMode: true
-  // No port needed for Socket Mode - Express server handles HTTP
 });
 
 // ================================
@@ -82,6 +81,8 @@ const pollMessages = new Map();
 let openEndedResponses = {};
 const userProfileCache = new Map();
 const sessionData = new Map();
+// Store view IDs for updates - important for race condition prevention
+const viewRegistry = new Map();
 
 // Storage functions
 function saveMessages() {
@@ -576,7 +577,7 @@ function reRegisterAllJobs() {
 }
 
 // ================================
-// MODAL BUILDERS
+// MODAL BUILDERS - SLACK API COMPLIANT
 // ================================
 class ModalBuilder {
   static createMainMenu(userId = null) {
@@ -1252,6 +1253,9 @@ class ModalBuilder {
           `${formatDateDisplay(msg.date)} at ${formatTimeDisplay(msg.time)}` : 
           `${msg.repeat} at ${formatTimeDisplay(msg.time)}`;
 
+        // Create a unique action_id for each message
+        const actionId = `manage_message_${msg.id}`;
+
         blocks.push({
           type: 'section',
           text: {
@@ -1260,10 +1264,16 @@ class ModalBuilder {
           },
           accessory: {
             type: 'overflow',
-            action_id: `manage_message_${msg.id}`,
+            action_id: actionId,
             options: [
-              { text: { type: 'plain_text', text: '✏️ Edit Message' }, value: `edit_${msg.id}` },
-              { text: { type: 'plain_text', text: '🗑️ Delete Message' }, value: `delete_${msg.id}` }
+              { 
+                text: { type: 'plain_text', text: '✏️ Edit Message' }, 
+                value: `edit_${msg.id}` 
+              },
+              { 
+                text: { type: 'plain_text', text: '🗑️ Delete Message' }, 
+                value: `delete_${msg.id}` 
+              }
             ]
           }
         });
@@ -1443,10 +1453,18 @@ app.command('/cat', async ({ command, ack, client }) => {
     console.log(`🐱 /cat command received from user ${command.user_id}`);
 
     const modal = ModalBuilder.createMainMenu(command.user_id);
-    await client.views.open({
+    const result = await client.views.open({
       trigger_id: command.trigger_id,
       view: modal
     });
+
+    // Store view ID for potential updates - important for Slack API compliance
+    if (result.ok && result.view && result.view.id) {
+      viewRegistry.set(command.user_id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log('✅ Main menu modal opened successfully');
   } catch (error) {
@@ -1455,7 +1473,7 @@ app.command('/cat', async ({ command, ack, client }) => {
 });
 
 // ================================
-// INTERACTIVE COMPONENT HANDLERS
+// INTERACTIVE COMPONENT HANDLERS - SLACK API COMPLIANT
 // ================================
 
 // Main menu - message type selection handlers
@@ -1469,10 +1487,19 @@ const handleMessageTypeSelection = async ({ ack, body, client }) => {
     const modal = ModalBuilder.createSetupModal(messageType);
     sessionData.set(body.user.id, { type: messageType, data: {} });
 
-    await client.views.update({
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash, // Include hash to prevent race conditions
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log(`✅ Setup modal opened for ${messageType}`);
   } catch (error) {
@@ -1485,16 +1512,26 @@ app.action('select_help_button', handleMessageTypeSelection);
 app.action('select_poll', handleMessageTypeSelection);
 app.action('select_custom', handleMessageTypeSelection);
 
-// Back to main menu
+// Back to main menu - using block_actions pattern
 app.action('back_to_main_menu', async ({ ack, body, client }) => {
   await ack();
 
   try {
     const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
+    
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash,
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log('✅ Returned to main menu');
   } catch (error) {
@@ -1502,7 +1539,7 @@ app.action('back_to_main_menu', async ({ ack, body, client }) => {
   }
 });
 
-// Back to preview from scheduler or send now
+// Back to preview from scheduler or send now - using block_actions pattern
 app.action('back_to_preview', async ({ ack, body, client }) => {
   await ack();
 
@@ -1512,10 +1549,19 @@ app.action('back_to_preview', async ({ ack, body, client }) => {
 
     const modal = ModalBuilder.createPreviewModal(messageType, sessionInfo.data || {});
 
-    await client.views.update({
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash,
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log(`✅ Returned to preview for ${messageType}`);
   } catch (error) {
@@ -1529,10 +1575,20 @@ app.action('create_new_message', async ({ ack, body, client }) => {
 
   try {
     const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
+    
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash,
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log('✅ Returned to main menu to create new message');
   } catch (error) {
@@ -1545,10 +1601,20 @@ app.action('create_first_message', async ({ ack, body, client }) => {
 
   try {
     const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
+    
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash,
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log('✅ Returned to main menu to create first message');
   } catch (error) {
@@ -1566,10 +1632,19 @@ app.action('back_to_setup', async ({ ack, body, client }) => {
 
     const modal = ModalBuilder.createSetupModal(messageType, sessionInfo.data || {});
 
-    await client.views.update({
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash,
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log(`✅ Returned to setup for ${messageType}`);
   } catch (error) {
@@ -1587,10 +1662,19 @@ app.action('go_to_scheduler', async ({ ack, body, client }) => {
 
     const modal = ModalBuilder.createSchedulerModal(messageType, sessionInfo.data || {});
 
-    await client.views.update({
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash,
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log(`✅ Scheduler modal opened for ${messageType}`);
   } catch (error) {
@@ -1608,10 +1692,19 @@ app.action('send_now', async ({ ack, body, client }) => {
 
     const modal = ModalBuilder.createSendNowModal(messageType, sessionInfo.data || {});
 
-    await client.views.update({
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash,
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log(`✅ Send Now modal opened for ${messageType}`);
   } catch (error) {
@@ -1625,10 +1718,20 @@ app.action('manage_scheduled_messages', async ({ ack, body, client }) => {
 
   try {
     const modal = ModalBuilder.createMessageManagerModal(scheduledMessages);
-    await client.views.update({
+    
+    const result = await client.views.update({
       view_id: body.view.id,
+      hash: body.view.hash,
       view: modal
     });
+
+    // Update view registry
+    if (result.ok && result.view) {
+      viewRegistry.set(body.user.id, {
+        viewId: result.view.id,
+        hash: result.view.hash
+      });
+    }
 
     console.log('📅 Message management opened');
   } catch (error) {
@@ -1636,18 +1739,38 @@ app.action('manage_scheduled_messages', async ({ ack, body, client }) => {
   }
 });
 
-// Message management overflow actions
+// Message management overflow actions - SLACK API COMPLIANT
 app.action(/^manage_message_.+/, async ({ ack, body, client, action }) => {
   await ack();
 
   try {
+    console.log('🔧 Message management action triggered:', action);
+
     const selectedOption = action.selected_option;
     if (!selectedOption || !selectedOption.value) {
       console.log('❌ No selected option found in overflow action');
+      await client.chat.postEphemeral({
+        channel: body.channel?.id || body.user.id,
+        user: body.user.id,
+        text: '❌ Invalid action selected. Please try again.'
+      });
       return;
     }
 
-    const [actionType, msgId] = selectedOption.value.split('_', 2);
+    console.log('🔧 Selected option:', selectedOption.value);
+
+    // Parse the action value (format: "action_msgId")
+    const actionValue = selectedOption.value;
+    const underscoreIndex = actionValue.indexOf('_');
+    
+    if (underscoreIndex === -1) {
+      console.log('❌ Invalid action format:', actionValue);
+      return;
+    }
+
+    const actionType = actionValue.substring(0, underscoreIndex);
+    const msgId = actionValue.substring(underscoreIndex + 1);
+
     console.log(`🔧 Managing message: ${actionType} for ${msgId}`);
 
     if (actionType === 'delete') {
@@ -1655,38 +1778,69 @@ app.action(/^manage_message_.+/, async ({ ack, body, client, action }) => {
       if (messageIndex >= 0) {
         const deletedMsg = scheduledMessages.splice(messageIndex, 1)[0];
 
+        // Clean up the job
         if (jobs.has(msgId)) {
-          jobs.get(msgId).destroy();
-          jobs.delete(msgId);
+          try {
+            jobs.get(msgId).destroy();
+            jobs.delete(msgId);
+          } catch (jobError) {
+            console.error(`❌ Error destroying job ${msgId}:`, jobError);
+          }
         }
 
         saveMessages();
         console.log(`🗑️ Deleted message: ${msgId}`);
 
+        // Update the modal with the new message list - SLACK API COMPLIANT UPDATE
         const modal = ModalBuilder.createMessageManagerModal(scheduledMessages);
-        await client.views.update({
+        const result = await client.views.update({
           view_id: body.view.id,
+          hash: body.view.hash,
           view: modal
         });
 
+        // Update view registry
+        if (result.ok && result.view) {
+          viewRegistry.set(body.user.id, {
+            viewId: result.view.id,
+            hash: result.view.hash
+          });
+        }
+
+        // Send confirmation
         await client.chat.postEphemeral({
-          channel: body.user.id,
+          channel: body.channel?.id || body.user.id,
           user: body.user.id,
           text: `✅ Message deleted successfully! 🗑️${cat()}`
         });
+      } else {
+        console.log(`❌ Message not found: ${msgId}`);
+        await client.chat.postEphemeral({
+          channel: body.channel?.id || body.user.id,
+          user: body.user.id,
+          text: '❌ Message not found. It may have already been deleted.'
+        });
       }
     } else if (actionType === 'edit') {
+      // For now, show a message that edit is not implemented
       await client.chat.postEphemeral({
-        channel: body.user.id,
+        channel: body.channel?.id || body.user.id,
         user: body.user.id,
         text: `✏️ Edit functionality coming soon! For now, you can delete and recreate the message.${cat()}`
+      });
+    } else {
+      console.log(`❌ Unknown action type: ${actionType}`);
+      await client.chat.postEphemeral({
+        channel: body.channel?.id || body.user.id,
+        user: body.user.id,
+        text: '❌ Unknown action. Please try again.'
       });
     }
   } catch (error) {
     console.error('❌ Error managing message:', error);
 
     await client.chat.postEphemeral({
-      channel: body.user.id,
+      channel: body.channel?.id || body.user.id,
       user: body.user.id,
       text: '❌ Error managing message. Please try again.'
     });
@@ -1705,220 +1859,237 @@ app.action('preview_vote', async ({ ack }) => {
 });
 
 // ================================
-// MODAL SUBMISSION HANDLERS
+// MODAL SUBMISSION HANDLERS - SLACK API COMPLIANT
 // ================================
 
-// Setup modal submissions - FIXED: Use views.update instead of views.push
+// Setup modal submissions - USING RESPONSE_ACTION PATTERN
 app.view(/^(daily_checkin|help_button|custom)_setup$/, async ({ ack, body, client }) => {
-  await ack();
+  const messageType = body.view.callback_id.replace('_setup', '');
+  const formData = extractFormData(body.view);
 
-  try {
-    const messageType = body.view.callback_id.replace('_setup', '');
-    const formData = extractFormData(body.view);
+  console.log(`👀 Going to preview for ${messageType}:`, formData);
 
-    console.log(`👀 Going to preview for ${messageType}:`, formData);
-
-    // Store data for later use
-    sessionData.set(body.user.id, { type: messageType, data: formData });
-
-    const modal = ModalBuilder.createPreviewModal(messageType, formData);
-
-    // FIXED: Use views.update instead of views.push for modal submissions
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log(`✅ Preview modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error updating to preview:', error);
+  // Validate required fields
+  let errors = {};
+  
+  if (!formData.text || formData.text.trim() === '') {
+    errors.message_content = 'Message content is required';
   }
+  
+  if (messageType === 'help_button' && (!formData.alertChannels || formData.alertChannels.length === 0)) {
+    errors.alert_channels = 'At least one alert channel is required for help buttons';
+  }
+
+  // If there are validation errors, return them using response_action
+  if (Object.keys(errors).length > 0) {
+    await ack({
+      response_action: 'errors',
+      errors: errors
+    });
+    return;
+  }
+
+  // Store data for later use
+  sessionData.set(body.user.id, { type: messageType, data: formData });
+
+  const modal = ModalBuilder.createPreviewModal(messageType, formData);
+
+  // SLACK API COMPLIANT: Use response_action to update the view
+  await ack({
+    response_action: 'update',
+    view: modal
+  });
+
+  console.log(`✅ Preview modal opened for ${messageType}`);
 });
 
-// Poll setup modal submission - FIXED
+// Poll setup modal submission - USING RESPONSE_ACTION PATTERN
 app.view('poll_setup', async ({ ack, body, client }) => {
-  await ack();
+  const messageType = 'poll';
+  const formData = extractFormData(body.view);
 
-  try {
-    const messageType = 'poll';
-    const formData = extractFormData(body.view);
+  console.log(`👀 Going to preview for ${messageType}:`, formData);
 
-    console.log(`👀 Going to preview for ${messageType}:`, formData);
-
-    // Store data for later use
-    sessionData.set(body.user.id, { type: messageType, data: formData });
-
-    const modal = ModalBuilder.createPreviewModal(messageType, formData);
-
-    // FIXED: Use views.update instead of views.push
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log(`✅ Preview modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error updating to preview:', error);
+  // Validate required fields
+  let errors = {};
+  
+  if (!formData.text || formData.text.trim() === '') {
+    errors.poll_question = 'Poll question is required';
   }
+  
+  if (!formData.pollOptions || formData.pollOptions.trim() === '') {
+    errors.poll_options = 'Poll options are required';
+  } else {
+    const options = formData.pollOptions.split('\n').filter(o => o.trim());
+    if (options.length < 2) {
+      errors.poll_options = 'At least 2 poll options are required';
+    }
+  }
+
+  // If there are validation errors, return them using response_action
+  if (Object.keys(errors).length > 0) {
+    await ack({
+      response_action: 'errors',
+      errors: errors
+    });
+    return;
+  }
+
+  // Store data for later use
+  sessionData.set(body.user.id, { type: messageType, data: formData });
+
+  const modal = ModalBuilder.createPreviewModal(messageType, formData);
+
+  // SLACK API COMPLIANT: Use response_action to update the view
+  await ack({
+    response_action: 'update',
+    view: modal
+  });
+
+  console.log(`✅ Preview modal opened for ${messageType}`);
 });
 
-// Send Now confirmation handler
+// Send Now confirmation handler - USING RESPONSE_ACTION PATTERN
 app.view('send_now_confirm', async ({ ack, body, client }) => {
-  await ack();
+  const userId = body.user.id;
+  const formData = extractFormData(body.view);
+  const sessionInfo = sessionData.get(userId) || {};
 
-  try {
-    const userId = body.user.id;
-    const formData = extractFormData(body.view);
-    const sessionInfo = sessionData.get(userId) || {};
+  // Validate required fields
+  let errors = {};
+  
+  if (!formData.sendChannel) {
+    errors.send_channel = 'Please select a channel to send your message to';
+  }
+  
+  if (!sessionInfo.data || !sessionInfo.type) {
+    errors.send_channel = 'Session data not found. Please try creating the message again';
+  }
 
-    if (!sessionInfo.data || !sessionInfo.type) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Error: Session data not found. Please try creating the message again.'
-      });
-      return;
-    }
+  // If there are validation errors, return them using response_action
+  if (Object.keys(errors).length > 0) {
+    await ack({
+      response_action: 'errors',
+      errors: errors
+    });
+    return;
+  }
 
-    const targetChannel = formData.sendChannel;
-    if (!targetChannel) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Please select a channel to send your message to.'
-      });
-      return;
-    }
+  // SLACK API COMPLIANT: Close all views using response_action
+  await ack({
+    response_action: 'clear'
+  });
 
-    // Create message object for sending
-    const messageData = {
-      ...sessionInfo.data,
-      type: sessionInfo.type,
-      channel: targetChannel,
-      id: generateId()
-    };
+  const targetChannel = formData.sendChannel;
 
-    // Send the message
-    const success = await sendMessage(messageData);
+  // Create message object for sending
+  const messageData = {
+    ...sessionInfo.data,
+    type: sessionInfo.type,
+    channel: targetChannel,
+    id: generateId()
+  };
 
-    if (success) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: `✅ Your ${sessionInfo.type.replace('_', ' ')} message has been sent successfully to <#${targetChannel}>! 🚀${cat()}`
-      });
-    } else {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Failed to send message. Please try again.'
-      });
-    }
+  // Send the message
+  const success = await sendMessage(messageData);
 
-    // Clear session data
-    sessionData.delete(userId);
-
-    console.log(`✅ Message sent immediately: ${sessionInfo.type} to ${targetChannel}`);
-  } catch (error) {
-    console.error('❌ Error sending message immediately:', error);
-
+  if (success) {
     await client.chat.postEphemeral({
-      channel: body.user.id,
-      user: body.user.id,
+      channel: userId,
+      user: userId,
+      text: `✅ Your ${sessionInfo.type.replace('_', ' ')} message has been sent successfully to <#${targetChannel}>! 🚀${cat()}`
+    });
+  } else {
+    await client.chat.postEphemeral({
+      channel: userId,
+      user: userId,
       text: '❌ Failed to send message. Please try again.'
     });
   }
+
+  // Clear session data
+  sessionData.delete(userId);
+
+  console.log(`✅ Message sent immediately: ${sessionInfo.type} to ${targetChannel}`);
 });
 
-// Scheduler modal submission
+// Scheduler modal submission - USING RESPONSE_ACTION PATTERN
 app.view('message_scheduler', async ({ ack, body, client }) => {
-  await ack();
+  const userId = body.user.id;
+  const formData = extractFormData(body.view);
+  const sessionInfo = sessionData.get(userId) || {};
 
-  try {
-    const userId = body.user.id;
-    const formData = extractFormData(body.view);
-    const sessionInfo = sessionData.get(userId) || {};
+  // Combine session data with form data
+  const messageData = { ...sessionInfo.data, ...formData };
+  messageData.type = sessionInfo.type;
+  messageData.id = generateId();
+  messageData.date = formData.scheduleDate || todayInEST();
+  messageData.time = formData.scheduleTime || currentTimeInEST();
+  messageData.repeat = formData.repeatValue || 'none';
+  messageData.channel = formData.targetChannel;
 
-    // Combine session data with form data
-    const messageData = { ...sessionInfo.data, ...formData };
-    messageData.type = sessionInfo.type;
-    messageData.id = generateId();
-    messageData.date = formData.scheduleDate || todayInEST();
-    messageData.time = formData.scheduleTime || currentTimeInEST();
-    messageData.repeat = formData.repeatValue || 'none';
-    messageData.channel = formData.targetChannel;
+  console.log('📋 Processing message submission:', messageData);
 
-    console.log('📋 Processing message submission:', messageData);
+  // Validation
+  let errors = {};
+  
+  if (!messageData.targetChannel) {
+    errors.target_channel = 'Please select a channel to send your message to';
+  }
 
-    // Validation
-    if (!messageData.targetChannel) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Please select a channel to send your message to.'
-      });
-      return;
-    }
+  if (messageData.type === 'help_button' && (!messageData.alertChannels || messageData.alertChannels.length === 0)) {
+    errors.target_channel = 'Please configure alert channels in the message setup';
+  }
 
-    if (messageData.type === 'help_button' && (!messageData.alertChannels || messageData.alertChannels.length === 0)) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Please select at least one alert channel for help notifications.'
-      });
-      return;
-    }
+  // Check if scheduling in the past
+  if (messageData.repeat === 'none' && isDateTimeInPast(messageData.date, messageData.time)) {
+    errors.schedule_timing = 'Cannot schedule messages in the past. Please select a future date and time';
+  }
 
-    // Check if scheduling in the past
-    if (messageData.repeat === 'none' && isDateTimeInPast(messageData.date, messageData.time)) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Cannot schedule messages in the past. Please select a future date and time.'
-      });
-      return;
-    }
+  // If there are validation errors, return them using response_action
+  if (Object.keys(errors).length > 0) {
+    await ack({
+      response_action: 'errors',
+      errors: errors
+    });
+    return;
+  }
 
-    // Save and schedule the message
-    scheduledMessages.push(messageData);
-    saveMessages();
+  // SLACK API COMPLIANT: Close all views using response_action
+  await ack({
+    response_action: 'clear'
+  });
 
-    const jobSuccess = scheduleJob(messageData);
+  // Save and schedule the message
+  scheduledMessages.push(messageData);
+  saveMessages();
 
-    if (jobSuccess) {
-      const successMessage = `✅ ${messageData.type.replace('_', ' ')} message scheduled successfully!${cat()}\n\n` +
-        `📍 Channel: <#${messageData.channel}>\n` +
-        `📅 Date: ${formatDateDisplay(messageData.date)}\n` +
-        `🕐 Time: ${formatTimeDisplay(messageData.time)}\n` +
-        `🔄 Repeat: ${messageData.repeat !== 'none' ? messageData.repeat : 'One-time only'}`;
+  const jobSuccess = scheduleJob(messageData);
 
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: successMessage
-      });
-
-      console.log(`✅ Message scheduled successfully: ${messageData.id}`);
-    } else {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Failed to schedule message. Please try again.'
-      });
-    }
-
-    // Clean up session data
-    sessionData.delete(userId);
-
-  } catch (error) {
-    console.error('❌ Error handling scheduler submission:', error);
+  if (jobSuccess) {
+    const successMessage = `✅ ${messageData.type.replace('_', ' ')} message scheduled successfully!${cat()}\n\n` +
+      `📍 Channel: <#${messageData.channel}>\n` +
+      `📅 Date: ${formatDateDisplay(messageData.date)}\n` +
+      `🕐 Time: ${formatTimeDisplay(messageData.time)}\n` +
+      `🔄 Repeat: ${messageData.repeat !== 'none' ? messageData.repeat : 'One-time only'}`;
 
     await client.chat.postEphemeral({
-      channel: body.user.id,
-      user: body.user.id,
-      text: '❌ An error occurred while scheduling your message. Please try again.'
+      channel: userId,
+      user: userId,
+      text: successMessage
+    });
+
+    console.log(`✅ Message scheduled successfully: ${messageData.id}`);
+  } else {
+    await client.chat.postEphemeral({
+      channel: userId,
+      user: userId,
+      text: '❌ Failed to schedule message. Please try again.'
     });
   }
+
+  // Clean up session data
+  sessionData.delete(userId);
 });
 
 // ================================
@@ -2065,7 +2236,8 @@ app.command('/cat-debug', async ({ ack, body, client }) => {
       `*Active Jobs:* ${jobs.size}\n` +
       `*Poll Data:* ${Object.keys(pollVotes).length} polls\n` +
       `*Memory Usage:* ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
-      `*Current EST Time:* ${currentTimeInEST()}`;
+      `*Current EST Time:* ${currentTimeInEST()}\n` +
+      `*View Registry:* ${viewRegistry.size} active views`;
 
     await client.chat.postEphemeral({
       channel: channelId,
@@ -2115,6 +2287,10 @@ cron.schedule('0 * * * *', () => {
     saveMessages();
     console.log(`🧹 Removed ${beforeCount - scheduledMessages.length} expired messages`);
   }
+
+  // Clean up old view registry entries
+  viewRegistry.clear();
+  console.log('🧹 Cleared view registry');
 }, { timezone: 'America/New_York' });
 
 // Memory management
