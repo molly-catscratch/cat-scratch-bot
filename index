@@ -1,2466 +1,1867 @@
-// ================================
-// CAT SCRATCH SLACK BOT - COMPLETE WORKING VERSION WITH NAVIGATION FIXES
-// ================================
+// ============================================
+// COMPLETE ENHANCED SLACK BOT SYSTEM
+// Version: 2.0
+// Features: Polls, Scheduled Messages, Fixed Navigation
+// ============================================
 
 const { App } = require('@slack/bolt');
-const express = require('express');
-const cron = require('node-cron');
-const fs = require('fs');
-require('dotenv').config();
+const schedule = require('node-schedule');
+const fs = require('fs').promises;
+const path = require('path');
 
-// ================================
-// KEEP-ALIVE SERVER
-// ================================
-const keep_alive = express();
+// ============================================
+// INITIALIZATION
+// ============================================
 
-keep_alive.get('/', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Cat Scratch Bot</title>
-        <style>
-            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f0f0; }
-            .container { background: white; padding: 30px; border-radius: 10px; display: inline-block; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            .status { color: #28a745; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🐱 Cat Scratch Bot is Alive!</h1>
-            <p class="status">Status: Running ✅</p>
-            <p>Uptime: ${Math.floor(process.uptime())} seconds</p>
-            <p>Time: ${new Date().toLocaleString()}</p>
-            <p>Ready to handle /cat commands!</p>
-            <p>Scheduled Messages: ${scheduledMessages.length}</p>
-        </div>
-    </body>
-    </html>
-  `);
-});
-
-keep_alive.get('/health', (req, res) => {
-  res.json({ 
-    status: 'alive',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    bot: 'Cat Scratch Bot',
-    scheduledMessages: scheduledMessages.length,
-    activeJobs: jobs.size
-  });
-});
-
-keep_alive.get('/ping', (req, res) => {
-  res.send('pong 🏓');
-});
-
-const PORT = process.env.PORT || 3000;
-keep_alive.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Keep-alive server running on port ${PORT}`);
-});
-
-// ================================
-// SLACK BOT INITIALIZATION
-// ================================
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  appToken: process.env.SLACK_APP_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  socketMode: true
+  appToken: process.env.SLACK_APP_TOKEN,
+  socketMode: true,
 });
 
-// ================================
-// STORAGE & STATE MANAGEMENT
-// ================================
-const SCHEDULE_FILE = './scheduledMessages.json';
-const POLLS_FILE = './pollData.json';
-let scheduledMessages = [];
-const jobs = new Map();
-let pollVotes = {};
-const pollMessages = new Map();
-let openEndedResponses = {};
-const userProfileCache = new Map();
-const sessionData = new Map();
-const viewRegistry = new Map();
+// ============================================
+// DATA STORAGE (In-Memory)
+// Replace with database in production
+// ============================================
 
-// Storage functions
-function saveMessages() {
-  try {
-    fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(scheduledMessages, null, 2));
-    console.log(`💾 Saved ${scheduledMessages.length} scheduled messages`);
-  } catch (e) {
-    console.error('❌ Save messages failed:', e);
-  }
-}
+const polls = new Map();
+const scheduledMessages = new Map();
+const activeJobs = new Map();
+const userPreferences = new Map();
 
-function savePollData() {
-  try {
-    const pollData = {
-      votes: pollVotes,
-      responses: openEndedResponses,
-      messages: Array.from(pollMessages.entries()).map(([id, data]) => [id, data])
-    };
-    fs.writeFileSync(POLLS_FILE, JSON.stringify(pollData, null, 2));
-    console.log(`💾 Saved poll data for ${Object.keys(pollVotes).length} polls`);
-  } catch (e) {
-    console.error('❌ Save poll data failed:', e);
-  }
-}
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
 
-function loadMessages() {
-  if (fs.existsSync(SCHEDULE_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(SCHEDULE_FILE));
-      console.log(`📂 Loading ${data.length} messages from storage`);
+const generateId = () => `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-      scheduledMessages = data.filter(msg => {
-        if (msg.repeat && msg.repeat !== 'none') {
-          return true;
-        }
-        const isPast = isDateTimeInPast(msg.date, msg.time);
-        return !isPast;
-      });
-
-      console.log(`📂 Loaded ${scheduledMessages.length} valid messages after filtering`);
-      if (scheduledMessages.length !== data.length) {
-        saveMessages();
-      }
-    } catch (e) {
-      console.error('❌ Load messages failed:', e);
-      scheduledMessages = [];
-    }
-  }
-}
-
-function loadPollData() {
-  if (fs.existsSync(POLLS_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(POLLS_FILE));
-      pollVotes = data.votes || {};
-      openEndedResponses = data.responses || {};
-      if (data.messages) {
-        data.messages.forEach(([id, messageData]) => {
-          pollMessages.set(id, messageData);
-        });
-      }
-      console.log(`📊 Loaded poll data for ${Object.keys(pollVotes).length} polls`);
-    } catch (e) {
-      console.error('❌ Load poll data failed:', e);
-      pollVotes = {};
-      openEndedResponses = {};
-    }
-  }
-}
-
-// ================================
-// UTILITIES
-// ================================
-const generateId = () => `msg_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-const cat = () => Math.random() < 0.35 ? ` ${['₍^. .^₎⟆', 'ᓚ₍ ^. .^₎', 'ฅ^•ﻌ•^ฅ'][Math.floor(Math.random() * 3)]}` : '';
-
-function todayInEST() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-}
-
-function currentTimeInEST() {
-  return new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'America/New_York',
+const formatDate = (date) => {
+  return new Date(date).toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
     hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  }).format(new Date());
-}
-
-function formatTimeDisplay(timeStr) {
-  if (!timeStr) return 'Invalid Time';
-  const [hour, minute] = timeStr.split(':').map(Number);
-  const period = hour >= 12 ? 'PM' : 'AM';
-  const displayHour = hour > 12 ? hour - 12 : hour === 0 ? 12 : hour;
-  return `${displayHour}:${minute.toString().padStart(2, '0')} ${period}`;
-}
-
-function formatDateDisplay(dateStr) {
-  if (!dateStr) return 'Invalid Date';
-  try {
-    const date = new Date(dateStr + 'T00:00:00');
-    return date.toLocaleDateString('en-US', { 
-      weekday: 'short', 
-      month: 'short', 
-      day: 'numeric',
-      year: 'numeric'
-    });
-  } catch (e) {
-    return 'Invalid Date';
-  }
-}
-
-function isDateTimeInPast(dateStr, timeStr) {
-  try {
-    const now = new Date();
-    const targetDateTime = new Date(`${dateStr}T${timeStr}:00`);
-    const nowEST = new Date(now.toLocaleString("en-US", {timeZone: "America/New_York"}));
-    const targetEST = new Date(targetDateTime.toLocaleString("en-US", {timeZone: "America/New_York"}));
-    return targetEST <= nowEST;
-  } catch (error) {
-    console.error('❌ Timezone calculation error:', error);
-    return false;
-  }
-}
-
-function extractFormData(view) {
-  const values = view.state.values;
-  const data = {};
-
-  // Extract basic content
-  if (values.message_content?.message_text?.value) {
-    data.text = values.message_content.message_text.value.trim();
-  }
-  if (values.message_content?.message_text?.rich_text_value) {
-    data.richText = values.message_content.message_text.rich_text_value;
-  }
-
-  // Extract alert channels for help button
-  if (values.alert_channels?.alert_channels_select?.selected_conversations) {
-    data.alertChannels = values.alert_channels.alert_channels_select.selected_conversations;
-  }
-
-  // Extract poll data
-  if (values.poll_question?.poll_question_text?.value) {
-    data.text = values.poll_question.poll_question_text.value.trim();
-  }
-  if (values.poll_options?.poll_options_text?.value) {
-    data.pollOptions = values.poll_options.poll_options_text.value.trim();
-  }
-
-  // Extract scheduling data
-  if (values.target_channel?.channel_select?.selected_conversation) {
-    data.targetChannel = values.target_channel.channel_select.selected_conversation;
-  }
-  if (values.schedule_timing?.date_picker?.selected_date) {
-    data.scheduleDate = values.schedule_timing.date_picker.selected_date;
-  }
-  if (values.schedule_timing?.time_picker?.selected_time) {
-    data.scheduleTime = values.schedule_timing.time_picker.selected_time;
-  }
-  if (values.repeat_options?.repeat_select?.selected_option) {
-    data.repeatValue = values.repeat_options.repeat_select.selected_option.value;
-    data.repeatOption = values.repeat_options.repeat_select.selected_option.text.text;
-  }
-
-  // Extract send now channel
-  if (values.send_channel?.immediate_channel_select?.selected_conversation) {
-    data.sendChannel = values.send_channel.immediate_channel_select.selected_conversation;
-  }
-
-  return data;
-}
-
-// ================================
-// MESSAGE TEMPLATES - EXACT SPECIFICATIONS
-// ================================
-const templates = {
-  daily_checkin: {
-    title: "Daily Bandwidth Check",
-    text: "How's everyone's capacity looking today?\n\nUse the reactions below to share your current workload:\n🟢 Light schedule - Ready for new work\n🟡 Manageable schedule\n🟠 Schedule is full, no new work\n🔴 Overloaded - Need help now"
-  },
-  help_button: {
-    title: "Need Backup?",
-    text: "If you're stuck or need assistance, click the button below to alert the team."
-  },
-  poll: "What would you like to ask the team?",
-  blank: ""
+    minute: '2-digit'
+  });
 };
 
-// ================================
-// MESSAGE GENERATION FUNCTIONS
-// ================================
-function generateMessageBlocks(type, data = {}) {
-  switch (type) {
-    case 'daily_checkin':
-      return [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: (data.title ? `*${data.title}*\n` : '') + (data.text || templates.daily_checkin.text) + cat()
-          }
-        }
-      ];
+const todayInEST = () => {
+  const now = new Date();
+  const estOffset = -5; // EST is UTC-5
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+  return new Date(utc + (3600000 * estOffset));
+};
 
-    case 'help_button':
-      return [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: (data.title ? `*${data.title}*\n` : '') + (data.text || templates.help_button.text) + cat()
-          }
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              style: 'danger',
-              text: { type: 'plain_text', text: '🆘 Request Backup', emoji: true },
-              action_id: `help_click_${data.id || 'preview'}`,
-              value: JSON.stringify({
-                msgId: data.id || 'preview',
-                alertChannels: data.alertChannels || []
-              })
-            }
-          ]
-        }
-      ];
+// ============================================
+// POLL TEMPLATES
+// ============================================
 
-    case 'poll':
-      const pollOptions = (data.pollOptions || 'Option 1\nOption 2\nOption 3').split('\n').filter(o => o.trim());
-      const blocks = [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*${data.text || templates.poll}* ${cat()}`
-          }
-        },
-        {
-          type: 'divider'
-        }
-      ];
-
-      const emojis = ['🍕', '🌮', '🍣', '🥗', '🍔', '🍝', '🥪', '🌯', '🍜', '🥘'];
-
-      pollOptions.forEach((option, index) => {
-        const emoji = emojis[index % emojis.length];
-        blocks.push(
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `${emoji} *${option.trim()}*`
-            },
-            accessory: {
-              type: 'button',
-              text: { type: 'plain_text', text: 'Vote', emoji: true },
-              action_id: `poll_vote_${data.id || 'preview'}`,
-              value: JSON.stringify({ 
-                pollId: data.id || 'preview', 
-                optionIndex: index, 
-                option: option.trim() 
-              })
-            }
-          },
-          {
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: '0 votes'
-            }]
-          }
-        );
-      });
-
-      return blocks;
-
-    case 'blank':
-    default:
-      if (data.richText && data.richText.elements) {
-        return [
-          {
-            type: 'rich_text',
-            elements: data.richText.elements
-          }
-        ];
-      } else {
-        return [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: (data.title ? `*${data.title}*\n` : '') + (data.text || 'Your blank message content') + cat()
-            }
-          }
-        ];
-      }
+const POLL_TEMPLATES = {
+  yes_no: {
+    name: "Yes/No",
+    description: "Simple binary choice",
+    options: ["Yes", "No"]
+  },
+  rating: {
+    name: "1-5 Rating",
+    description: "Rate on a scale of 1-5",
+    options: ["1 - Poor", "2 - Fair", "3 - Good", "4 - Very Good", "5 - Excellent"]
+  },
+  meeting_time: {
+    name: "Meeting Times",
+    description: "Choose meeting availability",
+    options: ["Morning (9-11am)", "Midday (11am-1pm)", "Afternoon (1-3pm)", "Late Afternoon (3-5pm)"]
+  },
+  custom: {
+    name: "Custom",
+    description: "Create your own options",
+    options: []
   }
-}
+};
 
-// ================================
-// MESSAGE SENDING FUNCTIONS
-// ================================
-async function sendMessage(msg) {
-  try {
-    if (!msg.channel) {
-      console.error('❌ No channel specified for message');
-      return false;
-    }
+// ============================================
+// MAIN MODAL BUILDER CLASS
+// ============================================
 
-    // Verify channel access
-    try {
-      await app.client.conversations.info({ channel: msg.channel });
-    } catch (error) {
-      console.error(`❌ Channel access failed: ${error.data?.error}`);
-      return false;
-    }
-
-    if (msg.type === 'daily_checkin') {
-      const messageText = (msg.title ? `*${msg.title}*\n` : '') + (msg.text || templates.daily_checkin.text) + cat();
-
-      const result = await app.client.chat.postMessage({
-        channel: msg.channel,
-        text: messageText
-      });
-
-      // Add reactions for capacity check
-      if (result.ok && result.ts) {
-        const reactions = ['green_heart', 'yellow_heart', 'orange_heart', 'red_circle'];
-        for (const reaction of reactions) {
-          try {
-            await new Promise(resolve => setTimeout(resolve, 100));
-            await app.client.reactions.add({ 
-              channel: msg.channel, 
-              timestamp: result.ts, 
-              name: reaction 
-            });
-          } catch (e) {
-            console.error(`❌ Reaction failed: ${e.data?.error}`);
-          }
-        }
-      }
-    } else if (msg.type === 'help_button') {
-      const blocks = generateMessageBlocks('help_button', msg);
-      await app.client.chat.postMessage({
-        channel: msg.channel,
-        text: 'Help button message',
-        blocks
-      });
-    } else if (msg.type === 'poll') {
-      const pollId = msg.id;
-      const blocks = generateMessageBlocks('poll', msg);
-
-      // Initialize poll data
-      if (!pollVotes[pollId]) {
-        pollVotes[pollId] = {};
-        pollMessages.set(pollId, {
-          channel: msg.channel,
-          options: (msg.pollOptions || '').split('\n').filter(o => o.trim()),
-          question: msg.text || templates.poll
-        });
-        savePollData();
-      }
-
-      await app.client.chat.postMessage({
-        channel: msg.channel,
-        text: 'Poll message',
-        blocks
-      });
-    } else {
-      // Blank message
-      const blocks = generateMessageBlocks('blank', msg);
-      await app.client.chat.postMessage({
-        channel: msg.channel,
-        text: 'Blank message',
-        blocks
-      });
-    }
-
-    console.log(`✅ ${msg.type} message sent to ${msg.channel}`);
-    return true;
-  } catch (e) {
-    console.error('❌ Send failed:', e);
-    return false;
-  }
-}
-
-// ================================
-// SCHEDULING FUNCTIONS
-// ================================
-function scheduleJob(msg) {
-  if (jobs.has(msg.id)) {
-    try {
-      jobs.get(msg.id).destroy();
-    } catch (e) {
-      console.error(`❌ Error destroying job: ${e.message}`);
-    }
-    jobs.delete(msg.id);
-  }
-
-  const [hh, mm] = msg.time.split(':').map(Number);
-  let cronExpr;
-
-  if (msg.repeat === 'daily') {
-    cronExpr = `${mm} ${hh} * * *`;
-  } else if (msg.repeat === 'weekly') {
-    const day = new Date(msg.date + 'T00:00:00').getDay();
-    cronExpr = `${mm} ${hh} * * ${day}`;
-  } else if (msg.repeat === 'monthly') {
-    const day = msg.date.split('-')[2];
-    cronExpr = `${mm} ${hh} ${day} * *`;
-  } else {
-    const [y, mon, d] = msg.date.split('-');
-    cronExpr = `${mm} ${hh} ${d} ${parseInt(mon)} *`;
-  }
-
-  console.log(`🕐 Creating job for ${msg.id}: ${cronExpr} (${msg.repeat})`);
-
-  try {
-    const job = cron.schedule(cronExpr, async () => {
-      console.log(`⚡ Executing scheduled ${msg.type} message: ${msg.id}`);
-
-      try {
-        const success = await sendMessage(msg);
-
-        if (success) {
-          console.log(`✅ Scheduled message executed successfully: ${msg.id}`);
-        } else {
-          console.error(`❌ Scheduled message execution failed: ${msg.id}`);
-        }
-
-        if (msg.repeat === 'none') {
-          console.log(`🗑️ Removing one-time message: ${msg.id}`);
-          const messageIndex = scheduledMessages.findIndex(m => m.id === msg.id);
-          if (messageIndex >= 0) {
-            scheduledMessages.splice(messageIndex, 1);
-            saveMessages();
-          }
-          try {
-            job.destroy();
-            jobs.delete(msg.id);
-          } catch (cleanupError) {
-            console.error(`❌ Error cleaning up job: ${cleanupError}`);
-          }
-        }
-      } catch (executionError) {
-        console.error(`❌ Error in job execution for ${msg.id}:`, executionError);
-      }
-    }, {
-      timezone: 'America/New_York',
-      scheduled: true
-    });
-
-    if (job) {
-      jobs.set(msg.id, job);
-      console.log(`✅ Job created successfully for ${msg.id}`);
-      return true;
-    } else {
-      console.error(`❌ Failed to create job for ${msg.id}`);
-      return false;
-    }
-  } catch (error) {
-    console.error(`❌ Error creating scheduled job for ${msg.id}:`, error);
-    return false;
-  }
-}
-
-function reRegisterAllJobs() {
-  console.log('🔄 Re-registering all scheduled jobs...');
-  let successCount = 0;
-  let failCount = 0;
-  let skippedCount = 0;
-
-  scheduledMessages.forEach((msg) => {
-    const shouldSchedule = msg.repeat !== 'none' || !isDateTimeInPast(msg.date, msg.time);
-    if (shouldSchedule) {
-      const success = scheduleJob(msg);
-      if (success) {
-        successCount++;
-      } else {
-        failCount++;
-      }
-    } else {
-      skippedCount++;
-    }
-  });
-
-  console.log(`📊 Job registration complete: ${successCount} success, ${failCount} failed, ${skippedCount} skipped`);
-}
-
-// ================================
-// MODAL BUILDERS - SLACK API COMPLIANT
-// ================================
 class ModalBuilder {
-  static createMainMenu(userId = null) {
+  // Main Dashboard
+  static mainMenu(trigger_id) {
     return {
-      type: 'modal',
-      callback_id: 'main_menu',
-      title: {
-        type: 'plain_text',
-        text: 'Cat Scratch Bot',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Close',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*Welcome ${userId ? `<@${userId}>` : 'to Cat Scratch'}!*\n\nChoose a message type to get started:${cat()}`
-          }
+      trigger_id,
+      view: {
+        type: 'modal',
+        callback_id: 'main_menu',
+        title: {
+          type: 'plain_text',
+          text: 'Bot Dashboard',
+          emoji: true
         },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Daily Check-In',
-                emoji: true
-              },
-              style: 'primary',
-              value: 'daily_checkin',
-              action_id: 'select_daily_checkin'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🆘 Help Button',
-                emoji: true
-              },
-              style: 'danger',
-              value: 'help_button',
-              action_id: 'select_help_button'
-            }
-          ]
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Polls',
-                emoji: true
-              },
-              value: 'poll',
-              action_id: 'select_poll'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📝 Blank',
-                emoji: true
-              },
-              value: 'blank',
-              action_id: 'select_blank'
-            }
-          ]
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📅 Manage Message Schedule',
-                emoji: true
-              },
-              style: 'primary',
-              value: 'manage_messages',
-              action_id: 'manage_scheduled_messages'
-            }
-          ]
-        },
-        {
-          type: 'context',
-          elements: [
-            {
-              type: 'mrkdwn',
-              text: '*Tip:* All messages can be scheduled for one-time or recurring delivery'
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  // PAGE 1: Template/Textbox for all message types
-  static createSetupModal(type, data = {}) {
-    const titles = {
-      daily_checkin: '📊 Daily Check-In Setup',
-      help_button: '🆘 Help Button Setup',
-      poll: '📊 Poll Setup',
-      blank: '📝 Blank Message Setup'
-    };
-
-    const labels = {
-      daily_checkin: '📊 Daily Check-In Message',
-      help_button: '🆘 Help Request Message',
-      poll: '❓ Poll Question',
-      blank: '📝 Message Content'
-    };
-
-    if (type === 'poll') {
-      return this.createPollSetupModal(data);
-    }
-
-    const initialValue = data.text || (templates[type] ? templates[type].text || templates[type] : '');
-
-    return {
-      type: 'modal',
-      callback_id: `${type}_setup`,
-      title: {
-        type: 'plain_text',
-        text: titles[type],
-        emoji: true
-      },
-      submit: {
-        type: 'plain_text',
-        text: 'Next →',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*Page 1: Template/Textbox*${cat()}\n\nCustomize your ${type.replace('_', ' ')} message:`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'input',
-          block_id: 'message_content',
-          element: type === 'blank' ? {
-            type: 'rich_text_input',
-            action_id: 'message_text'
-          } : {
-            type: 'plain_text_input',
-            multiline: true,
-            action_id: 'message_text',
-            initial_value: initialValue,
-            placeholder: {
-              type: 'plain_text',
-              text: `Enter your ${type.replace('_', ' ')} message...`
-            }
-          },
-          label: {
-            type: 'plain_text',
-            text: labels[type],
-            emoji: true
-          }
-        },
-        ...(type === 'help_button' ? [{
-          type: 'input',
-          block_id: 'alert_channels',
-          element: {
-            type: 'multi_conversations_select',
-            action_id: 'alert_channels_select',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Select channels to alert...',
-              emoji: true
-            },
-            filter: {
-              include: ['public', 'private']
-            },
-            ...(data.alertChannels ? { initial_conversations: data.alertChannels } : {})
-          },
-          label: {
-            type: 'plain_text',
-            text: 'Alert Channels',
-            emoji: true
-          },
-          optional: false
-        }] : []),
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Back to Menu',
-                emoji: true
-              },
-              action_id: 'back_to_main_menu',
-              value: 'back'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Daily Check-In',
-                emoji: true
-              },
-              value: 'daily_checkin',
-              action_id: 'nav_daily_checkin'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🆘 Help',
-                emoji: true
-              },
-              value: 'help_button',
-              action_id: 'nav_help_button'
-            }
-          ]
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Poll',
-                emoji: true
-              },
-              value: 'poll',
-              action_id: 'nav_poll'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📝 Blank',
-                emoji: true
-              },
-              value: 'blank',
-              action_id: 'nav_blank'
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  static createPollSetupModal(data = {}) {
-    return {
-      type: 'modal',
-      callback_id: 'poll_setup',
-      title: {
-        type: 'plain_text',
-        text: '📊 Poll Setup',
-        emoji: true
-      },
-      submit: {
-        type: 'plain_text',
-        text: 'Next →',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*Page 1: Template/Textbox*${cat()}\n\nCreate your poll:`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'input',
-          block_id: 'poll_question',
-          element: {
-            type: 'plain_text_input',
-            multiline: true,
-            action_id: 'poll_question_text',
-            initial_value: data.text || templates.poll,
-            placeholder: {
-              type: 'plain_text',
-              text: 'Enter your poll question...'
-            }
-          },
-          label: {
-            type: 'plain_text',
-            text: '❓ Poll Question',
-            emoji: true
-          }
-        },
-        {
-          type: 'input',
-          block_id: 'poll_options',
-          element: {
-            type: 'plain_text_input',
-            multiline: true,
-            action_id: 'poll_options_text',
-            initial_value: data.pollOptions || 'Option 1\nOption 2\nOption 3',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Enter each option on a new line...'
-            }
-          },
-          label: {
-            type: 'plain_text',
-            text: '📝 Poll Options (one per line)',
-            emoji: true
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Back to Menu',
-                emoji: true
-              },
-              action_id: 'back_to_main_menu',
-              value: 'back'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Daily Check-In',
-                emoji: true
-              },
-              value: 'daily_checkin',
-              action_id: 'nav_daily_checkin'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🆘 Help',
-                emoji: true
-              },
-              value: 'help_button',
-              action_id: 'nav_help_button'
-            }
-          ]
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Poll',
-                emoji: true
-              },
-              value: 'poll',
-              action_id: 'nav_poll'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📝 Blank',
-                emoji: true
-              },
-              value: 'blank',
-              action_id: 'nav_blank'
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  // PAGE 2: Message Preview with Post Now/Schedule Later - FIXED
-  static createPreviewModal(type, data = {}) {
-    const typeLabels = {
-      daily_checkin: '📊 Daily Check-In',
-      help_button: '🆘 Help Button',
-      poll: '📊 Poll',
-      blank: '📝 Blank Message'
-    };
-
-    return {
-      type: 'modal',
-      callback_id: 'message_preview',
-      title: {
-        type: 'plain_text',
-        text: '👀 Message Preview',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*Page 2: Message Preview*${cat()}\n\nPreview your ${typeLabels[type] || 'message'}:`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        ...this.generatePreviewBlocks(type, data),
-        {
-          type: 'divider'
-        },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*Post now? Yes / No Schedule for later*'
-          }
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '✅ Post Now (Yes)',
-                emoji: true
-              },
-              style: 'primary',
-              value: type, // CRITICAL: Message type as value
-              action_id: 'post_now'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📅 Schedule for Later (No)',
-                emoji: true
-              },
-              value: type, // CRITICAL: Message type as value
-              action_id: 'schedule_later'
-            }
-          ]
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Edit Message',
-                emoji: true
-              },
-              value: type,
-              action_id: 'back_to_setup'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🏠 Main Menu',
-                emoji: true
-              },
-              action_id: 'back_to_main_menu',
-              value: 'back'
-            }
-          ]
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Daily Check-In',
-                emoji: true
-              },
-              value: 'daily_checkin',
-              action_id: 'nav_daily_checkin'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🆘 Help',
-                emoji: true
-              },
-              value: 'help_button',
-              action_id: 'nav_help_button'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Poll',
-                emoji: true
-              },
-              value: 'poll',
-              action_id: 'nav_poll'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📝 Blank',
-                emoji: true
-              },
-              value: 'blank',
-              action_id: 'nav_blank'
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  // PAGE 3: Scheduler
-  static createSchedulerModal(type, data = {}) {
-    const typeLabels = {
-      daily_checkin: '📊 Daily Check-In',
-      help_button: '🆘 Help Button',
-      poll: '📊 Poll',
-      blank: '📝 Blank Message'
-    };
-
-    return {
-      type: 'modal',
-      callback_id: 'message_scheduler',
-      submit: {
-        type: 'plain_text',
-        text: '🚀 Schedule Message',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      title: {
-        type: 'plain_text',
-        text: '📅 Schedule Message',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*Page 3: Scheduler*${cat()}\n\nSchedule your ${typeLabels[type] || 'message'}:`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'input',
-          block_id: 'target_channel',
-          element: {
-            type: 'conversations_select',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Select a channel',
-              emoji: true
-            },
-            action_id: 'channel_select',
-            filter: {
-              include: ['public', 'private']
-            },
-            ...(data.targetChannel ? { initial_conversation: data.targetChannel } : {})
-          },
-          label: {
-            type: 'plain_text',
-            text: '📍 Select Channel to post to',
-            emoji: true
-          }
-        },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*Select time (EST) or post now:*'
-          }
-        },
-        {
-          type: 'actions',
-          block_id: 'schedule_timing',
-          elements: [
-            {
-              type: 'datepicker',
-              initial_date: data.scheduleDate || todayInEST(),
-              placeholder: {
-                type: 'plain_text',
-                text: 'Select date'
-              },
-              action_id: 'date_picker'
-            },
-            {
-              type: 'timepicker',
-              initial_time: data.scheduleTime || currentTimeInEST(),
-              placeholder: {
-                type: 'plain_text',
-                text: 'Select time (EST)'
-              },
-              action_id: 'time_picker'
-            }
-          ]
-        },
-        {
-          type: 'input',
-          block_id: 'repeat_options',
-          element: {
-            type: 'static_select',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Select repeat option'
-            },
-            options: [
-              { text: { type: 'plain_text', text: 'One-time only' }, value: 'none' },
-              { text: { type: 'plain_text', text: 'Daily' }, value: 'daily' },
-              { text: { type: 'plain_text', text: 'Weekly' }, value: 'weekly' },
-              { text: { type: 'plain_text', text: 'Monthly' }, value: 'monthly' }
-            ],
-            action_id: 'repeat_select',
-            initial_option: { text: { type: 'plain_text', text: 'One-time only' }, value: 'none' }
-          },
-          label: {
-            type: 'plain_text',
-            text: '🔄 Repeat options (Daily Weekly Monthly or custom)',
-            emoji: true
-          },
-          optional: true
-        },
-        {
-          type: 'context',
-          elements: [{
-            type: 'mrkdwn',
-            text: '🕐 All times are in Eastern Time (EST). Messages will be sent at the scheduled time.'
-          }]
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Back to Preview',
-                emoji: true
-              },
-              action_id: 'back_to_preview',
-              value: type
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🏠 Main Menu',
-                emoji: true
-              },
-              action_id: 'back_to_main_menu',
-              value: 'back'
-            }
-          ]
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Daily Check-In',
-                emoji: true
-              },
-              value: 'daily_checkin',
-              action_id: 'nav_daily_checkin'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🆘 Help',
-                emoji: true
-              },
-              value: 'help_button',
-              action_id: 'nav_help_button'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📊 Poll',
-                emoji: true
-              },
-              value: 'poll',
-              action_id: 'nav_poll'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📝 Blank',
-                emoji: true
-              },
-              value: 'blank',
-              action_id: 'nav_blank'
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  // Post Now Modal
-  static createPostNowModal(type, data = {}) {
-    const typeLabels = {
-      daily_checkin: '📊 Daily Check-In',
-      help_button: '🆘 Help Button',
-      poll: '📊 Poll',
-      blank: '📝 Blank Message'
-    };
-
-    return {
-      type: 'modal',
-      callback_id: 'post_now_confirm',
-      title: {
-        type: 'plain_text',
-        text: '🚀 Post Now',
-        emoji: true
-      },
-      submit: {
-        type: 'plain_text',
-        text: '🚀 Post Now',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*Ready to post your ${typeLabels[type] || 'message'} now!*${cat()}\n\nSelect a channel:`
-          }
-        },
-        {
-          type: 'input',
-          block_id: 'send_channel',
-          element: {
-            type: 'conversations_select',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Select a channel',
-              emoji: true
-            },
-            action_id: 'immediate_channel_select',
-            filter: {
-              include: ['public', 'private']
-            }
-          },
-          label: {
-            type: 'plain_text',
-            text: '📍 Post to Channel',
-            emoji: true
-          }
-        },
-        {
-          type: 'context',
-          elements: [
-            {
-              type: 'mrkdwn',
-              text: '💡 This will post your message immediately to the selected channel'
-            }
-          ]
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Back to Preview',
-                emoji: true
-              },
-              action_id: 'back_to_preview',
-              value: type
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  static createMessageManagerModal(scheduledMessages = []) {
-    const blocks = [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*📅 Manage Schedule Messages*${cat()}\n\n${scheduledMessages.length > 0 ? `You have *${scheduledMessages.length}* scheduled message${scheduledMessages.length !== 1 ? 's' : ''}` : 'No scheduled messages yet'}`
-        }
-      },
-      {
-        type: 'divider'
-      }
-    ];
-
-    if (scheduledMessages.length === 0) {
-      blocks.push(
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '🔄 *No scheduled messages yet*\n\nUse the button below to create your first scheduled message!'
-          }
-        },
-        {
-          type: 'actions',
-          elements: [{
-            type: 'button',
-            text: { type: 'plain_text', text: '✨ Create First Message', emoji: true },
-            style: 'primary',
-            action_id: 'create_first_message',
-            value: 'create_first'
-          }]
-        }
-      );
-    } else {
-      scheduledMessages.forEach((msg, index) => {
-        const nextRun = msg.repeat === 'none' ? 
-          `${formatDateDisplay(msg.date)} at ${formatTimeDisplay(msg.time)}` : 
-          `${msg.repeat} at ${formatTimeDisplay(msg.time)}`;
-
-        const actionId = `manage_message_${msg.id}`;
-
-        blocks.push({
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*${msg.title || (msg.type ? msg.type.replace('_', ' ') : 'Message')}*\n📅 ${nextRun}\n📍 <#${msg.channel}>`
-          },
-          accessory: {
-            type: 'overflow',
-            action_id: actionId,
-            options: [
-              { 
-                text: { type: 'plain_text', text: '✏️ Edit Message' }, 
-                value: `edit_${msg.id}` 
-              },
-              { 
-                text: { type: 'plain_text', text: '🗑️ Delete Message' }, 
-                value: `delete_${msg.id}` 
-              }
-            ]
-          }
-        });
-      });
-    }
-
-    blocks.push(
-      { type: 'divider' },
-      {
-        type: 'actions',
-        elements: [
+        blocks: [
           {
-            type: 'button',
-            text: { type: 'plain_text', text: '🏠 Back to Menu', emoji: true },
-            action_id: 'back_to_main_menu',
-            value: 'back'
+            type: 'header',
+            text: {
+              type: 'plain_text',
+              text: '🚀 Welcome to Your Bot Dashboard',
+              emoji: true
+            }
           },
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: '➕ Create New Message', emoji: true },
-            style: 'primary',
-            action_id: 'create_new_message',
-            value: 'new'
-          }
-        ]
-      }
-    );
-
-    return {
-      type: 'modal',
-      callback_id: 'message_manager',
-      title: { type: 'plain_text', text: 'Manage Schedule Messages', emoji: true },
-      close: { type: 'plain_text', text: 'Close', emoji: true },
-      blocks
-    };
-  }
-
-  static generatePreviewBlocks(type, data = {}) {
-    switch (type) {
-      case 'daily_checkin':
-        return [
           {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `📋 *Preview:*\n\n${data.text || templates.daily_checkin.text}`
-            }
-          },
-          {
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: '↓ These reactions will be automatically added ↓'
-            }]
-          },
-          {
-            type: 'section',
-            fields: [
-              { type: 'mrkdwn', text: '*🟢 Light schedule*\nReady for new work' },
-              { type: 'mrkdwn', text: '*🟡 Manageable*\nCurrently balanced' },
-              { type: 'mrkdwn', text: '*🟠 Schedule full*\nNo new work please' },
-              { type: 'mrkdwn', text: '*🔴 Overloaded*\nNeed help now' }
-            ]
-          }
-        ];
-
-      case 'help_button':
-        return [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `🆘 *Preview:*\n\n${data.text || templates.help_button.text}`
-            }
-          },
-          {
-            type: 'actions',
-            elements: [{
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🆘 Request Backup',
-                emoji: true
-              },
-              style: 'danger',
-              action_id: 'preview_help_button',
-              value: 'preview_only'
-            }]
-          },
-          {
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: `Alert will be sent to: ${data.alertChannels && data.alertChannels.length > 0 ? data.alertChannels.map(c => `<#${c}>`).join(', ') : '(selected channels)'}`
-            }]
-          }
-        ];
-
-      case 'poll':
-        const pollOptions = (data.pollOptions || 'Option 1\nOption 2\nOption 3').split('\n').filter(o => o.trim());
-        const previewBlocks = [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `📊 *Preview:*\n\n*${data.text || templates.poll}*`
+              text: `*Hello <@${trigger_id}>!*\nWhat would you like to do today?`
             }
           },
           {
             type: 'divider'
-          }
-        ];
-
-        const emojis = ['🍕', '🌮', '🍣', '🥗', '🍔', '🍝', '🥪', '🌯', '🍜', '🥘'];
-
-        pollOptions.forEach((option, index) => {
-          const emoji = emojis[index % emojis.length];
-          previewBlocks.push({
+          },
+          // Poll Section
+          {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: `${emoji} *${option.trim()}*`
+              text: '*📊 Polls & Surveys*\nCreate and manage interactive polls'
+            }
+          },
+          {
+            type: 'actions',
+            elements: [
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '📊 Create Poll',
+                  emoji: true
+                },
+                style: 'primary',
+                action_id: 'open_poll_creator'
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '📋 View Active Polls',
+                  emoji: true
+                },
+                action_id: 'view_active_polls'
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '📈 Poll History',
+                  emoji: true
+                },
+                action_id: 'view_poll_history'
+              }
+            ]
+          },
+          {
+            type: 'divider'
+          },
+          // Scheduled Messages Section
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: '*⏰ Scheduled Messages*\nAutomate your communications'
+            }
+          },
+          {
+            type: 'actions',
+            elements: [
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '⏰ Schedule Message',
+                  emoji: true
+                },
+                style: 'primary',
+                action_id: 'open_scheduler'
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '📅 View Scheduled',
+                  emoji: true
+                },
+                action_id: 'view_scheduled'
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '📝 Templates',
+                  emoji: true
+                },
+                action_id: 'message_templates'
+              }
+            ]
+          },
+          {
+            type: 'divider'
+          },
+          // Settings Section
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: '*⚙️ Settings & Help*'
+            }
+          },
+          {
+            type: 'actions',
+            elements: [
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '⚙️ Preferences',
+                  emoji: true
+                },
+                action_id: 'open_preferences'
+              },
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: '❓ Help',
+                  emoji: true
+                },
+                action_id: 'show_help'
+              }
+            ]
+          },
+          {
+            type: 'context',
+            elements: [
+              {
+                type: 'mrkdwn',
+                text: `Last login: ${formatDate(new Date())} | Version 2.0`
+              }
+            ]
+          }
+        ]
+      }
+    };
+  }
+
+  // Poll Creator with Templates
+  static pollCreator(metadata = {}) {
+    const selectedTemplate = metadata.template || 'custom';
+    const templateData = POLL_TEMPLATES[selectedTemplate];
+    
+    return {
+      type: 'modal',
+      callback_id: 'poll_creator',
+      private_metadata: JSON.stringify(metadata),
+      title: {
+        type: 'plain_text',
+        text: 'Create New Poll',
+        emoji: true
+      },
+      submit: {
+        type: 'plain_text',
+        text: 'Create Poll',
+        emoji: true
+      },
+      close: {
+        type: 'plain_text',
+        text: 'Cancel',
+        emoji: true
+      },
+      blocks: [
+        {
+          type: 'header',
+          text: {
+            type: 'plain_text',
+            text: '📊 Poll Configuration',
+            emoji: true
+          }
+        },
+        // Template Selection
+        {
+          type: 'section',
+          block_id: 'template_select',
+          text: {
+            type: 'mrkdwn',
+            text: '*Choose a template:*'
+          },
+          accessory: {
+            type: 'static_select',
+            action_id: 'select_template',
+            placeholder: {
+              type: 'plain_text',
+              text: 'Select template'
             },
-            accessory: {
-              type: 'button',
+            initial_option: {
               text: {
                 type: 'plain_text',
-                emoji: true,
-                text: 'Vote'
+                text: templateData.name
               },
-              value: `vote_${index}`,
-              action_id: 'preview_vote'
-            }
-          });
-        });
-
-        return previewBlocks;
-
-      case 'blank':
-      default:
-        if (data.richText && data.richText.elements) {
-          return [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: '📝 *Preview:*'
-              }
+              value: selectedTemplate
             },
-            {
-              type: 'rich_text',
-              elements: data.richText.elements
-            }
-          ];
-        } else {
-          return [
-            {
-              type: 'section',
+            options: Object.entries(POLL_TEMPLATES).map(([key, template]) => ({
               text: {
-                type: 'mrkdwn',
-                text: `📝 *Preview:*\n\n${data.text || 'Your blank message content will appear here'}`
-              }
+                type: 'plain_text',
+                text: template.name
+              },
+              value: key
+            }))
+          }
+        },
+        // Poll Question
+        {
+          type: 'input',
+          block_id: 'poll_question',
+          label: {
+            type: 'plain_text',
+            text: 'Poll Question',
+            emoji: true
+          },
+          element: {
+            type: 'plain_text_input',
+            action_id: 'question_input',
+            placeholder: {
+              type: 'plain_text',
+              text: 'What would you like to ask?'
+            },
+            initial_value: metadata.question || '',
+            max_length: 200
+          }
+        },
+        // Channel Selection
+        {
+          type: 'input',
+          block_id: 'poll_channel',
+          label: {
+            type: 'plain_text',
+            text: 'Post to Channel',
+            emoji: true
+          },
+          element: {
+            type: 'channels_select',
+            action_id: 'channel_select',
+            placeholder: {
+              type: 'plain_text',
+              text: 'Select a channel'
             }
-          ];
+          }
+        },
+        // Poll Options (Dynamic based on template)
+        ...this.generatePollOptionsBlocks(selectedTemplate, metadata.options),
+        // Advanced Settings Section
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '*⚙️ Advanced Settings*'
+          }
+        },
+        // Multiple Choice Toggle
+        {
+          type: 'section',
+          block_id: 'multiple_choice',
+          text: {
+            type: 'mrkdwn',
+            text: 'Allow multiple selections'
+          },
+          accessory: {
+            type: 'checkboxes',
+            action_id: 'multiple_toggle',
+            options: [
+              {
+                text: {
+                  type: 'plain_text',
+                  text: 'Enable'
+                },
+                value: 'multiple_enabled'
+              }
+            ],
+            initial_options: metadata.allowMultiple ? [{
+              text: {
+                type: 'plain_text',
+                text: 'Enable'
+              },
+              value: 'multiple_enabled'
+            }] : []
+          }
+        },
+        // Anonymous Voting
+        {
+          type: 'section',
+          block_id: 'anonymous_voting',
+          text: {
+            type: 'mrkdwn',
+            text: 'Anonymous voting'
+          },
+          accessory: {
+            type: 'checkboxes',
+            action_id: 'anonymous_toggle',
+            options: [
+              {
+                text: {
+                  type: 'plain_text',
+                  text: 'Enable'
+              },
+              value: 'anonymous_enabled'
+            }
+          }
+        },
+        // Time Limit
+        {
+          type: 'section',
+          block_id: 'time_limit',
+          text: {
+            type: 'mrkdwn',
+            text: 'Set time limit for poll'
+          },
+          accessory: {
+            type: 'static_select',
+            action_id: 'time_select',
+            placeholder: {
+              type: 'plain_text',
+              text: 'No time limit'
+            },
+            options: [
+              { text: { type: 'plain_text', text: 'No limit' }, value: 'none' },
+              { text: { type: 'plain_text', text: '15 minutes' }, value: '15' },
+              { text: { type: 'plain_text', text: '30 minutes' }, value: '30' },
+              { text: { type: 'plain_text', text: '1 hour' }, value: '60' },
+              { text: { type: 'plain_text', text: '2 hours' }, value: '120' },
+              { text: { type: 'plain_text', text: '1 day' }, value: '1440' }
+            ]
+          }
+        },
+        // Preview Section
+        {
+          type: 'divider'
+        },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '*📱 Preview:*\n' + this.generatePollPreview(metadata)
+          }
         }
+      ]
+    };
+  }
+
+  static generatePollOptionsBlocks(template, customOptions = []) {
+    const blocks = [];
+    const options = template === 'custom' ? customOptions : POLL_TEMPLATES[template].options;
+    
+    if (template === 'custom') {
+      // For custom polls, allow editing options
+      for (let i = 0; i < Math.max(2, options.length); i++) {
+        blocks.push({
+          type: 'input',
+          block_id: `option_${i}`,
+          label: {
+            type: 'plain_text',
+            text: `Option ${i + 1}`
+          },
+          element: {
+            type: 'plain_text_input',
+            action_id: `option_input_${i}`,
+            placeholder: {
+              type: 'plain_text',
+              text: 'Enter option text'
+            },
+            initial_value: options[i] || '',
+            max_length: 75
+          },
+          optional: i >= 2
+        });
+      }
+      
+      // Add button to add more options
+      blocks.push({
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: {
+              type: 'plain_text',
+              text: '➕ Add Option',
+              emoji: true
+            },
+            action_id: 'add_poll_option'
+          }
+        ]
+      });
+    } else {
+      // For template polls, show read-only preview
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*Poll Options:*\n' + options.map((opt, i) => `${i + 1}. ${opt}`).join('\n')
+        }
+      });
     }
+    
+    return blocks;
+  }
+
+  static generatePollPreview(metadata) {
+    const question = metadata.question || '_Your question will appear here_';
+    const template = metadata.template || 'custom';
+    const options = template === 'custom' ? 
+      (metadata.options || ['Option 1', 'Option 2']) : 
+      POLL_TEMPLATES[template].options;
+    
+    let preview = `*${question}*\n\n`;
+    options.forEach((opt, i) => {
+      if (opt) {
+        preview += `${i + 1}️⃣ ${opt}\n`;
+      }
+    });
+    
+    if (metadata.allowMultiple) {
+      preview += '\n_✓ Multiple selections allowed_';
+    }
+    if (metadata.anonymous) {
+      preview += '\n_🔒 Anonymous voting enabled_';
+    }
+    
+    return preview;
+  }
+
+  // Scheduled Message Creator
+  static messageScheduler(metadata = {}) {
+    const isEdit = metadata.messageId ? true : false;
+    
+    return {
+      type: 'modal',
+      callback_id: isEdit ? 'edit_scheduled_message' : 'schedule_message',
+      private_metadata: JSON.stringify(metadata),
+      title: {
+        type: 'plain_text',
+        text: isEdit ? 'Edit Scheduled Message' : 'Schedule Message',
+        emoji: true
+      },
+      submit: {
+        type: 'plain_text',
+        text: isEdit ? 'Update' : 'Schedule',
+        emoji: true
+      },
+      close: {
+        type: 'plain_text',
+        text: 'Cancel',
+        emoji: true
+      },
+      blocks: [
+        {
+          type: 'header',
+          text: {
+            type: 'plain_text',
+            text: isEdit ? '✏️ Edit Scheduled Message' : '⏰ Schedule New Message',
+            emoji: true
+          }
+        },
+        // Channel Selection
+        {
+          type: 'input',
+          block_id: 'message_channel',
+          label: {
+            type: 'plain_text',
+            text: 'Select Channel',
+            emoji: true
+          },
+          element: {
+            type: 'channels_select',
+            action_id: 'channel_select',
+            placeholder: {
+              type: 'plain_text',
+              text: 'Choose a channel'
+            },
+            initial_channel: metadata.channel
+          }
+        },
+        // Message Content
+        {
+          type: 'input',
+          block_id: 'message_content',
+          label: {
+            type: 'plain_text',
+            text: 'Message Content',
+            emoji: true
+          },
+          element: {
+            type: 'plain_text_input',
+            action_id: 'message_input',
+            multiline: true,
+            placeholder: {
+              type: 'plain_text',
+              text: 'Enter your message here...'
+            },
+            initial_value: metadata.message || '',
+            max_length: 3000
+          }
+        },
+        // Schedule Type Selection
+        {
+          type: 'section',
+          block_id: 'schedule_type',
+          text: {
+            type: 'mrkdwn',
+            text: '*Schedule Type:*'
+          },
+          accessory: {
+            type: 'radio_buttons',
+            action_id: 'schedule_type_select',
+            initial_option: {
+              text: {
+                type: 'plain_text',
+                text: metadata.scheduleType === 'recurring' ? 'Recurring' : 'One-time'
+              },
+              value: metadata.scheduleType || 'one_time'
+            },
+            options: [
+              {
+                text: {
+                  type: 'plain_text',
+                  text: 'One-time'
+                },
+                value: 'one_time'
+              },
+              {
+                text: {
+                  type: 'plain_text',
+                  text: 'Recurring'
+                },
+                value: 'recurring'
+              }
+            ]
+          }
+        },
+        // Date Selection (for one-time)
+        {
+          type: 'input',
+          block_id: 'schedule_date',
+          label: {
+            type: 'plain_text',
+            text: 'Date',
+            emoji: true
+          },
+          element: {
+            type: 'datepicker',
+            action_id: 'date_select',
+            placeholder: {
+              type: 'plain_text',
+              text: 'Select date'
+            },
+            initial_date: metadata.date || new Date().toISOString().split('T')[0]
+          }
+        },
+        // Time Selection
+        {
+          type: 'input',
+          block_id: 'schedule_time',
+          label: {
+            type: 'plain_text',
+            text: 'Time (24-hour format)',
+            emoji: true
+          },
+          element: {
+            type: 'timepicker',
+            action_id: 'time_select',
+            placeholder: {
+              type: 'plain_text',
+              text: 'Select time'
+            },
+            initial_time: metadata.time || '09:00'
+          }
+        },
+        // Recurring Options (shown if recurring is selected)
+        ...(metadata.scheduleType === 'recurring' ? [
+          {
+            type: 'section',
+            block_id: 'recurring_options',
+            text: {
+              type: 'mrkdwn',
+              text: '*Repeat:*'
+            },
+            accessory: {
+              type: 'static_select',
+              action_id: 'recurring_frequency',
+              placeholder: {
+                type: 'plain_text',
+                text: 'Select frequency'
+              },
+              initial_option: metadata.frequency ? {
+                text: {
+                  type: 'plain_text',
+                  text: metadata.frequency.charAt(0).toUpperCase() + metadata.frequency.slice(1)
+                },
+                value: metadata.frequency
+              } : undefined,
+              options: [
+                {
+                  text: { type: 'plain_text', text: 'Daily' },
+                  value: 'daily'
+                },
+                {
+                  text: { type: 'plain_text', text: 'Weekly' },
+                  value: 'weekly'
+                },
+                {
+                  text: { type: 'plain_text', text: 'Monthly' },
+                  value: 'monthly'
+                }
+              ]
+            }
+          }
+        ] : []),
+        // Message Preview
+        {
+          type: 'divider'
+        },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '*📱 Message Preview:*\n' + (metadata.message || '_Your message will appear here_')
+          }
+        }
+      ]
+    };
+  }
+
+  // View Scheduled Messages
+  static viewScheduledMessages(userId) {
+    const userMessages = Array.from(scheduledMessages.values()).filter(msg => 
+      msg.userId === userId && msg.status === 'active'
+    );
+    
+    const blocks = [
+      {
+        type: 'header',
+        text: {
+          type: 'plain_text',
+          text: '📅 Your Scheduled Messages',
+          emoji: true
+        }
+      }
+    ];
+    
+    if (userMessages.length === 0) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '_No scheduled messages found. Create one to get started!_'
+        }
+      });
+    } else {
+      userMessages.forEach(msg => {
+        const scheduleText = msg.scheduleType === 'recurring' ? 
+          `🔄 ${msg.frequency} at ${msg.time}` : 
+          `📅 ${msg.date} at ${msg.time}`;
+        
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Channel:* <#${msg.channel}>\n` +
+                  `*Schedule:* ${scheduleText}\n` +
+                  `*Message:* ${msg.message.substring(0, 100)}${msg.message.length > 100 ? '...' : ''}\n` +
+                  `*Status:* ${msg.status === 'active' ? '✅ Active' : '⏸️ Paused'}`
+          },
+          accessory: {
+            type: 'overflow',
+            action_id: `message_actions_${msg.id}`,
+            options: [
+              {
+                text: {
+                  type: 'plain_text',
+                  text: '✏️ Edit',
+                  emoji: true
+                },
+                value: `edit_${msg.id}`
+              },
+              {
+                text: {
+                  type: 'plain_text',
+                  text: msg.status === 'active' ? '⏸️ Pause' : '▶️ Resume',
+                  emoji: true
+                },
+                value: msg.status === 'active' ? `pause_${msg.id}` : `resume_${msg.id}`
+              },
+              {
+                text: {
+                  type: 'plain_text',
+                  text: '🗑️ Delete',
+                  emoji: true
+                },
+                value: `delete_${msg.id}`
+              },
+              {
+                text: {
+                  type: 'plain_text',
+                  text: '📤 Send Now',
+                  emoji: true
+                },
+                value: `send_now_${msg.id}`
+              }
+            ]
+          }
+        });
+        blocks.push({ type: 'divider' });
+      });
+    }
+    
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: '🔙 Back to Menu',
+            emoji: true
+          },
+          action_id: 'back_to_menu'
+        },
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: '➕ Schedule New',
+            emoji: true
+          },
+          style: 'primary',
+          action_id: 'open_scheduler'
+        }
+      ]
+    });
+    
+    return {
+      type: 'modal',
+      callback_id: 'view_scheduled_messages',
+      title: {
+        type: 'plain_text',
+        text: 'Scheduled Messages',
+        emoji: true
+      },
+      blocks
+    };
+  }
+
+  // View Active Polls
+  static activePollsList(userId) {
+    const userPolls = Array.from(polls.values()).filter(poll => 
+      poll.creator === userId && poll.status === 'active'
+    );
+    
+    const blocks = [
+      {
+        type: 'header',
+        text: {
+          type: 'plain_text',
+          text: '📊 Your Active Polls',
+          emoji: true
+        }
+      }
+    ];
+    
+    if (userPolls.length === 0) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '_No active polls found. Create one to get started!_'
+        }
+      });
+    } else {
+      userPolls.forEach(poll => {
+        const voteCount = Object.keys(poll.votes || {}).length;
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*${poll.question}*\n` +
+                  `Channel: <#${poll.channel}>\n` +
+                  `Votes: ${voteCount}\n` +
+                  `Created: ${formatDate(poll.created)}`
+          },
+          accessory: {
+            type: 'overflow',
+            action_id: `poll_actions_${poll.id}`,
+            options: [
+              {
+                text: { type: 'plain_text', text: '📈 View Results' },
+                value: `view_results_${poll.id}`
+              },
+              {
+                text: { type: 'plain_text', text: '🔄 Refresh Poll' },
+                value: `refresh_${poll.id}`
+              },
+              {
+                text: { type: 'plain_text', text: '🏁 Close Poll' },
+                value: `close_${poll.id}`
+              }
+            ]
+          }
+        });
+        blocks.push({ type: 'divider' });
+      });
+    }
+    
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: '🔙 Back to Menu',
+            emoji: true
+          },
+          action_id: 'back_to_menu'
+        },
+        {
+          type: 'button',
+          text: {
+            type: 'plain_text',
+            text: '➕ Create New Poll',
+            emoji: true
+          },
+          style: 'primary',
+          action_id: 'open_poll_creator'
+        }
+      ]
+    });
+    
+    return {
+      type: 'modal',
+      callback_id: 'active_polls_list',
+      title: {
+        type: 'plain_text',
+        text: 'Active Polls',
+        emoji: true
+      },
+      blocks
+    };
+  }
+
+  // Delete Confirmation Modal
+  static deleteConfirmation(messageId) {
+    const message = scheduledMessages.get(messageId);
+    
+    return {
+      type: 'modal',
+      callback_id: 'confirm_delete_message',
+      private_metadata: messageId,
+      title: {
+        type: 'plain_text',
+        text: 'Confirm Delete',
+        emoji: true
+      },
+      submit: {
+        type: 'plain_text',
+        text: 'Delete',
+        emoji: true,
+        style: 'danger'
+      },
+      close: {
+        type: 'plain_text',
+        text: 'Cancel',
+        emoji: true
+      },
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '⚠️ *Are you sure you want to delete this scheduled message?*\n\n' +
+                  'This action cannot be undone.'
+          }
+        },
+        {
+          type: 'divider'
+        },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*Channel:* <#${message.channel}>\n` +
+                  `*Message:* ${message.message.substring(0, 200)}${message.message.length > 200 ? '...' : ''}`
+          }
+        }
+      ]
+    };
+  }
+
+  static generateProgressBar(percentage) {
+    const filled = Math.round(percentage / 10);
+    const empty = 10 - filled;
+    return '█'.repeat(filled) + '░'.repeat(empty);
   }
 }
 
-// ================================
+// ============================================
 // SLASH COMMAND HANDLER
-// ================================
-app.command('/cat', async ({ command, ack, client }) => {
+// ============================================
+
+app.command('/bot', async ({ command, ack, client }) => {
   await ack();
-
+  
   try {
-    console.log(`🐱 /cat command received from user ${command.user_id}`);
+    const result = await client.views.open(
+      ModalBuilder.mainMenu(command.trigger_id)
+    );
+    
+    console.log('Main menu opened:', result.view.id);
+  } catch (error) {
+    console.error('Error opening main menu:', error);
+  }
+});
 
-    const modal = ModalBuilder.createMainMenu(command.user_id);
-    const result = await client.views.open({
-      trigger_id: command.trigger_id,
-      view: modal
+// ============================================
+// NAVIGATION ACTION HANDLERS
+// ============================================
+
+// Back to Menu Navigation - CRITICAL WITH HASH
+app.action('back_to_menu', async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    await client.views.update({
+      view_id: body.view.id,
+      hash: body.view.hash, // CRITICAL: Include hash
+      view: {
+        type: 'modal',
+        callback_id: 'main_menu',
+        title: {
+          type: 'plain_text',
+          text: 'Bot Dashboard',
+          emoji: true
+        },
+        blocks: ModalBuilder.mainMenu().view.blocks
+      }
     });
+  } catch (error) {
+    console.error('Error returning to menu:', error);
+  }
+});
 
-    if (result.ok && result.view && result.view.id) {
-      viewRegistry.set(command.user_id, {
-        viewId: result.view.id,
-        hash: result.view.hash
+// ============================================
+// POLL ACTION HANDLERS
+// ============================================
+
+// Open Poll Creator
+app.action('open_poll_creator', async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    await client.views.update({
+      view_id: body.view.id,
+      hash: body.view.hash, // Include hash
+      view: ModalBuilder.pollCreator()
+    });
+  } catch (error) {
+    console.error('Error opening poll creator:', error);
+  }
+});
+
+// Template Selection Handler
+app.action('select_template', async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    const selectedTemplate = body.actions[0].selected_option.value;
+    const currentMetadata = JSON.parse(body.view.private_metadata || '{}');
+    
+    const updatedMetadata = {
+      ...currentMetadata,
+      template: selectedTemplate,
+      options: selectedTemplate === 'custom' ? currentMetadata.options : POLL_TEMPLATES[selectedTemplate].options
+    };
+    
+    await client.views.update({
+      view_id: body.view.id,
+      hash: body.view.hash, // Include hash
+      view: ModalBuilder.pollCreator(updatedMetadata)
+    });
+  } catch (error) {
+    console.error('Error updating template:', error);
+  }
+});
+
+// Add Poll Option Handler
+app.action('add_poll_option', async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    const currentMetadata = JSON.parse(body.view.private_metadata || '{}');
+    const stateValues = body.view.state.values;
+    const options = [];
+    
+    for (let i = 0; i < 10; i++) {
+      const blockId = `option_${i}`;
+      if (stateValues[blockId]) {
+        const value = stateValues[blockId][`option_input_${i}`]?.value;
+        if (value) options.push(value);
+      }
+    }
+    
+    options.push('');
+    
+    const updatedMetadata = {
+      ...currentMetadata,
+      options,
+      template: 'custom'
+    };
+    
+    await client.views.update({
+      view_id: body.view.id,
+      hash: body.view.hash, // Include hash
+      view: ModalBuilder.pollCreator(updatedMetadata)
+    });
+  } catch (error) {
+    console.error('Error adding poll option:', error);
+  }
+});
+
+// View Active Polls
+app.action('view_active_polls', async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    await client.views.update({
+      view_id: body.view.id,
+      hash: body.view.hash, // Include hash
+      view: ModalBuilder.activePollsList(body.user.id)
+    });
+  } catch (error) {
+    console.error('Error viewing active polls:', error);
+  }
+});
+
+// Poll Overflow Menu Actions
+app.action(/^poll_actions_.*/, async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    const selectedOption = body.actions[0].selected_option;
+    const [action, , pollId] = selectedOption.value.split('_');
+    
+    if (action === 'view' && selectedOption.value.startsWith('view_results')) {
+      // View results logic here
+    } else if (action === 'close') {
+      const poll = polls.get(pollId);
+      if (poll) {
+        poll.status = 'closed';
+        await postPollResults(client, poll);
+      }
+      
+      await client.views.update({
+        view_id: body.view.id,
+        hash: body.view.hash, // Include hash
+        view: ModalBuilder.activePollsList(body.user.id)
       });
     }
-
-    console.log('✅ Main menu modal opened successfully');
   } catch (error) {
-    console.error('❌ Error opening modal:', error);
+    console.error('Error handling poll action:', error);
   }
 });
 
-// ================================
-// INTERACTIVE COMPONENT HANDLERS - SLACK API COMPLIANT
-// ================================
-
-// Main menu selections (block_action → views.update)
-app.action('select_daily_checkin', async ({ ack, body, client }) => {
+// Poll Vote Handler
+app.action(/^poll_vote_.*/, async ({ body, ack, client }) => {
   await ack();
+  
   try {
-    const modal = ModalBuilder.createSetupModal('daily_checkin');
-    sessionData.set(body.user.id, { type: 'daily_checkin', data: {} });
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log('✅ Daily check-in setup opened');
-  } catch (error) {
-    console.error('❌ Error opening daily check-in setup:', error);
-  }
-});
-
-app.action('select_help_button', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const modal = ModalBuilder.createSetupModal('help_button');
-    sessionData.set(body.user.id, { type: 'help_button', data: {} });
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log('✅ Help button setup opened');
-  } catch (error) {
-    console.error('❌ Error opening help button setup:', error);
-  }
-});
-
-app.action('select_poll', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const modal = ModalBuilder.createSetupModal('poll');
-    sessionData.set(body.user.id, { type: 'poll', data: {} });
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log('✅ Poll setup opened');
-  } catch (error) {
-    console.error('❌ Error opening poll setup:', error);
-  }
-});
-
-app.action('select_blank', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const modal = ModalBuilder.createSetupModal('blank');
-    sessionData.set(body.user.id, { type: 'blank', data: {} });
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log('✅ Blank message setup opened');
-  } catch (error) {
-    console.error('❌ Error opening blank message setup:', error);
-  }
-});
-
-// Navigation handlers with data preservation (block_action → views.update)
-const handleNavigation = async (targetType, { ack, body, client }) => {
-  await ack();
-  try {
-    const currentSession = sessionData.get(body.user.id) || {};
-    const modal = ModalBuilder.createSetupModal(targetType, currentSession.data || {});
-    sessionData.set(body.user.id, { 
-      type: targetType, 
-      data: currentSession.data || {} 
-    });
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log(`✅ Navigation to ${targetType} (data preserved)`);
-  } catch (error) {
-    console.error(`❌ Error navigating to ${targetType}:`, error);
-  }
-};
-
-app.action('nav_daily_checkin', (params) => handleNavigation('daily_checkin', params));
-app.action('nav_help_button', (params) => handleNavigation('help_button', params));
-app.action('nav_poll', (params) => handleNavigation('poll', params));
-app.action('nav_blank', (params) => handleNavigation('blank', params));
-
-// Back navigation (block_action → views.update)
-app.action('back_to_main_menu', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log('✅ Returned to main menu');
-  } catch (error) {
-    console.error('❌ Error returning to main menu:', error);
-  }
-});
-
-app.action('back_to_preview', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const messageType = body.actions[0].value;
-    const sessionInfo = sessionData.get(body.user.id) || {};
-    const modal = ModalBuilder.createPreviewModal(messageType, sessionInfo.data || {});
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log(`✅ Returned to preview for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error returning to preview:', error);
-  }
-});
-
-app.action('back_to_setup', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const messageType = body.actions[0].value;
-    const sessionInfo = sessionData.get(body.user.id) || {};
-    const modal = ModalBuilder.createSetupModal(messageType, sessionInfo.data || {});
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log(`✅ Returned to setup for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error returning to setup:', error);
-  }
-});
-
-// Post Now and Schedule Later buttons (block_action → views.update) - FIXED
-app.action('post_now', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    console.log('Post Now button clicked');
-    const messageType = body.actions[0].value;
-    const sessionInfo = sessionData.get(body.user.id) || {};
-    console.log(`Session info for post now:`, sessionInfo);
+    const [, , pollId, optionIndex] = body.actions[0].action_id.split('_');
+    const poll = polls.get(pollId);
     
-    const modal = ModalBuilder.createPostNowModal(messageType, sessionInfo.data || {});
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log(`✅ Post Now modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error opening post now modal:', error);
-  }
-});
-
-app.action('schedule_later', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    console.log('Schedule Later button clicked');
-    const messageType = body.actions[0].value;
-    const sessionInfo = sessionData.get(body.user.id) || {};
-    console.log(`Session info for schedule later:`, sessionInfo);
-    
-    const modal = ModalBuilder.createSchedulerModal(messageType, sessionInfo.data || {});
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log(`✅ Scheduler modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error going to scheduler:', error);
-  }
-});
-
-// Manage scheduled messages (block_action → views.update) - FIXED
-app.action('manage_scheduled_messages', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    console.log('Message Manager button clicked');
-    const modal = ModalBuilder.createMessageManagerModal(scheduledMessages);
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log('✅ Message management opened');
-  } catch (error) {
-    console.error('❌ Error accessing message management:', error);
-  }
-});
-
-// Create new/first message handlers
-app.action('create_new_message', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log('✅ Returned to main menu to create new message');
-  } catch (error) {
-    console.error('❌ Error returning to main menu:', error);
-  }
-});
-
-app.action('create_first_message', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-    console.log('✅ Returned to main menu to create first message');
-  } catch (error) {
-    console.error('❌ Error returning to main menu:', error);
-  }
-});
-
-// Message management overflow actions
-app.action(/^manage_message_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-  try {
-    const selectedOption = action.selected_option;
-    if (!selectedOption || !selectedOption.value) {
-      console.log('❌ No selected option found in overflow action');
-      return;
-    }
-
-    const actionValue = selectedOption.value;
-    const underscoreIndex = actionValue.indexOf('_');
-    
-    if (underscoreIndex === -1) {
-      console.log('❌ Invalid action format:', actionValue);
-      return;
-    }
-
-    const actionType = actionValue.substring(0, underscoreIndex);
-    const msgId = actionValue.substring(underscoreIndex + 1);
-
-    console.log(`🔧 Managing message: ${actionType} for ${msgId}`);
-
-    if (actionType === 'delete') {
-      const messageIndex = scheduledMessages.findIndex(msg => msg.id === msgId);
-      if (messageIndex >= 0) {
-        const deletedMsg = scheduledMessages.splice(messageIndex, 1)[0];
-
-        if (jobs.has(msgId)) {
-          try {
-            jobs.get(msgId).destroy();
-            jobs.delete(msgId);
-          } catch (jobError) {
-            console.error(`❌ Error destroying job ${msgId}:`, jobError);
-          }
-        }
-
-        saveMessages();
-        console.log(`🗑️ Deleted message: ${msgId}`);
-
-        const modal = ModalBuilder.createMessageManagerModal(scheduledMessages);
-        await client.views.update({
-          view_id: body.view.id,
-          view: modal
-        });
-
-        await client.chat.postEphemeral({
-          channel: body.channel?.id || body.user.id,
-          user: body.user.id,
-          text: `✅ Message deleted successfully! 🗑️${cat()}`
-        });
-      }
-    } else if (actionType === 'edit') {
+    if (!poll || poll.status !== 'active') {
       await client.chat.postEphemeral({
-        channel: body.channel?.id || body.user.id,
+        channel: body.channel.id,
         user: body.user.id,
-        text: `✏️ Edit functionality coming soon! For now, you can delete and recreate the message.${cat()}`
+        text: '❌ This poll is no longer active.'
       });
+      return;
     }
-  } catch (error) {
-    console.error('❌ Error managing message:', error);
-    await client.chat.postEphemeral({
-      channel: body.channel?.id || body.user.id,
-      user: body.user.id,
-      text: '❌ Error managing message. Please try again.'
-    });
-  }
-});
-
-// Preview button handlers (non-functional)
-app.action('preview_help_button', async ({ ack }) => {
-  await ack();
-  console.log('👆 Preview help button clicked (non-functional)');
-});
-
-app.action('preview_vote', async ({ ack }) => {
-  await ack();
-  console.log('👆 Preview vote button clicked (non-functional)');
-});
-
-// ================================
-// MODAL SUBMISSION HANDLERS - SLACK API COMPLIANT (view_submission → response_action)
-// ================================
-
-// PAGE 1 → PAGE 2: Setup to Preview (view_submission → response_action) - FIXED
-app.view('daily_checkin_setup', async ({ ack, body }) => {
-  const formData = extractFormData(body.view);
-  console.log('Daily check-in setup submission:', formData);
-
-  const errors = {};
-  if (!formData.text || formData.text.trim() === '') {
-    errors.message_content = 'Message content is required';
-  }
-
-  if (Object.keys(errors).length > 0) {
-    await ack({ response_action: 'errors', errors: errors });
-    return;
-  }
-
-  sessionData.set(body.user.id, { type: 'daily_checkin', data: formData });
-  const previewModal = ModalBuilder.createPreviewModal('daily_checkin', formData);
-  
-  await ack({ response_action: 'update', view: previewModal });
-  console.log('✅ Daily check-in: Page 1 → Page 2');
-});
-
-app.view('help_button_setup', async ({ ack, body }) => {
-  const formData = extractFormData(body.view);
-  console.log('Help button setup submission:', formData);
-
-  const errors = {};
-  if (!formData.text || formData.text.trim() === '') {
-    errors.message_content = 'Message content is required';
-  }
-  if (!formData.alertChannels || formData.alertChannels.length === 0) {
-    errors.alert_channels = 'At least one alert channel is required';
-  }
-
-  if (Object.keys(errors).length > 0) {
-    await ack({ response_action: 'errors', errors: errors });
-    return;
-  }
-
-  sessionData.set(body.user.id, { type: 'help_button', data: formData });
-  const previewModal = ModalBuilder.createPreviewModal('help_button', formData);
-  
-  await ack({ response_action: 'update', view: previewModal });
-  console.log('✅ Help button: Page 1 → Page 2');
-});
-
-app.view('poll_setup', async ({ ack, body }) => {
-  const formData = extractFormData(body.view);
-  console.log('Poll setup submission:', formData);
-
-  const errors = {};
-  if (!formData.text || formData.text.trim() === '') {
-    errors.poll_question = 'Poll question is required';
-  }
-  if (!formData.pollOptions || formData.pollOptions.trim() === '') {
-    errors.poll_options = 'Poll options are required';
-  } else {
-    const options = formData.pollOptions.split('\n').filter(o => o.trim());
-    if (options.length < 2) {
-      errors.poll_options = 'At least 2 poll options are required';
-    }
-  }
-
-  if (Object.keys(errors).length > 0) {
-    await ack({ response_action: 'errors', errors: errors });
-    return;
-  }
-
-  sessionData.set(body.user.id, { type: 'poll', data: formData });
-  const previewModal = ModalBuilder.createPreviewModal('poll', formData);
-  
-  await ack({ response_action: 'update', view: previewModal });
-  console.log('✅ Poll: Page 1 → Page 2');
-});
-
-app.view('blank_setup', async ({ ack, body }) => {
-  const formData = extractFormData(body.view);
-  console.log('Blank setup submission:', formData);
-
-  const errors = {};
-  if (!formData.text && !formData.richText) {
-    errors.message_content = 'Message content is required';
-  }
-
-  if (Object.keys(errors).length > 0) {
-    await ack({ response_action: 'errors', errors: errors });
-    return;
-  }
-
-  sessionData.set(body.user.id, { type: 'blank', data: formData });
-  const previewModal = ModalBuilder.createPreviewModal('blank', formData);
-  
-  await ack({ response_action: 'update', view: previewModal });
-  console.log('✅ Blank: Page 1 → Page 2');
-});
-
-// Post Now submission (view_submission → response_action)
-app.view('post_now_confirm', async ({ ack, body, client }) => {
-  const formData = extractFormData(body.view);
-  const sessionInfo = sessionData.get(body.user.id) || {};
-
-  const errors = {};
-  if (!formData.sendChannel) {
-    errors.send_channel = 'Please select a channel';
-  }
-  if (!sessionInfo.data || !sessionInfo.type) {
-    errors.send_channel = 'Session data not found. Please try again.';
-  }
-
-  if (Object.keys(errors).length > 0) {
-    await ack({ response_action: 'errors', errors: errors });
-    return;
-  }
-
-  await ack({ response_action: 'clear' });
-
-  const messageData = {
-    ...sessionInfo.data,
-    type: sessionInfo.type,
-    channel: formData.sendChannel,
-    id: generateId()
-  };
-
-  const success = await sendMessage(messageData);
-  const statusMessage = success 
-    ? `✅ ${sessionInfo.type.replace('_', ' ')} posted to <#${formData.sendChannel}>!${cat()}`
-    : '❌ Failed to post message. Please try again.';
-
-  await client.chat.postEphemeral({
-    channel: body.user.id,
-    user: body.user.id,
-    text: statusMessage
-  });
-
-  sessionData.delete(body.user.id);
-  console.log(`✅ Message posted: ${sessionInfo.type}`);
-});
-
-// Scheduler submission (view_submission → response_action)
-app.view('message_scheduler', async ({ ack, body, client }) => {
-  const formData = extractFormData(body.view);
-  const sessionInfo = sessionData.get(body.user.id) || {};
-
-  const messageData = { ...sessionInfo.data, ...formData };
-  messageData.type = sessionInfo.type;
-  messageData.id = generateId();
-  messageData.date = formData.scheduleDate || todayInEST();
-  messageData.time = formData.scheduleTime || currentTimeInEST();
-  messageData.repeat = formData.repeatValue || 'none';
-  messageData.channel = formData.targetChannel;
-
-  const errors = {};
-  if (!messageData.targetChannel) {
-    errors.target_channel = 'Please select a channel';
-  }
-  if (messageData.type === 'help_button' && (!messageData.alertChannels || messageData.alertChannels.length === 0)) {
-    errors.target_channel = 'Please configure alert channels in message setup';
-  }
-  if (messageData.repeat === 'none' && isDateTimeInPast(messageData.date, messageData.time)) {
-    errors.schedule_timing = 'Cannot schedule messages in the past';
-  }
-
-  if (Object.keys(errors).length > 0) {
-    await ack({ response_action: 'errors', errors: errors });
-    return;
-  }
-
-  await ack({ response_action: 'clear' });
-
-  scheduledMessages.push(messageData);
-  saveMessages();
-
-  const jobSuccess = scheduleJob(messageData);
-  const statusMessage = jobSuccess
-    ? `✅ ${messageData.type.replace('_', ' ')} scheduled for <#${messageData.channel}> at ${formatTimeDisplay(messageData.time)}${cat()}`
-    : '❌ Failed to schedule message. Please try again.';
-
-  await client.chat.postEphemeral({
-    channel: body.user.id,
-    user: body.user.id,
-    text: statusMessage
-  });
-
-  sessionData.delete(body.user.id);
-  console.log(`✅ Message scheduled: ${messageData.type}`);
-});
-
-// ================================
-// POLL VOTING HANDLERS
-// ================================
-app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-
-  try {
-    const actionData = JSON.parse(action.value);
-    const { pollId, optionIndex, option } = actionData;
+    
     const userId = body.user.id;
-
-    if (pollId === 'preview') {
-      console.log('👆 Preview poll vote clicked (non-functional)');
-      return;
+    const selectedOption = poll.options[parseInt(optionIndex)];
+    
+    if (!poll.votes[userId]) {
+      poll.votes[userId] = [];
     }
-
-    if (!pollVotes[pollId]) {
-      pollVotes[pollId] = {};
-    }
-
-    if (pollVotes[pollId][userId] === optionIndex) {
-      delete pollVotes[pollId][userId];
+    
+    if (poll.allowMultiple) {
+      const voteIndex = poll.votes[userId].indexOf(selectedOption);
+      if (voteIndex > -1) {
+        poll.votes[userId].splice(voteIndex, 1);
+      } else {
+        poll.votes[userId].push(selectedOption);
+      }
     } else {
-      pollVotes[pollId][userId] = optionIndex;
+      poll.votes[userId] = [selectedOption];
     }
-
-    savePollData();
-
-    const pollData = pollMessages.get(pollId);
-    if (pollData) {
-      const voteCounts = {};
-      Object.values(pollVotes[pollId]).forEach(voteIndex => {
-        voteCounts[voteIndex] = (voteCounts[voteIndex] || 0) + 1;
-      });
-
-      const blocks = generateMessageBlocks('poll', {
-        id: pollId,
-        text: pollData.question,
-        pollOptions: pollData.options.join('\n')
-      });
-
-      blocks.forEach((block, blockIndex) => {
-        if (block.type === 'context' && blockIndex > 2) {
-          const optionIndex = Math.floor((blockIndex - 3) / 2);
-          const voteCount = voteCounts[optionIndex] || 0;
-          block.elements[0].text = `${voteCount} vote${voteCount !== 1 ? 's' : ''}`;
-        }
-      });
-
-      await client.chat.update({
-        channel: pollData.channel,
-        ts: body.message.ts,
-        text: 'Poll message',
-        blocks
-      });
-    }
-
-    console.log(`🗳️ Vote recorded: User ${userId} voted for option ${optionIndex} in poll ${pollId}`);
-
+    
+    await updatePollMessage(client, poll);
+    
+    await client.chat.postEphemeral({
+      channel: body.channel.id,
+      user: userId,
+      text: `✅ Your vote has been recorded!`
+    });
+    
   } catch (error) {
-    console.error('❌ Error handling poll vote:', error);
+    console.error('Error handling vote:', error);
   }
 });
 
-// ================================
-// HELP BUTTON HANDLERS
-// ================================
-app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
+// ============================================
+// SCHEDULED MESSAGE ACTION HANDLERS
+// ============================================
+
+// Open Message Scheduler
+app.action('open_scheduler', async ({ body, ack, client }) => {
   await ack();
-
+  
   try {
-    const actionData = JSON.parse(action.value);
-    const alertChannels = actionData.alertChannels || [];
-    const user = body.user.id;
-    const channel = body.channel.id;
+    await client.views.update({
+      view_id: body.view.id,
+      hash: body.view.hash, // Include hash
+      view: ModalBuilder.messageScheduler()
+    });
+  } catch (error) {
+    console.error('Error opening scheduler:', error);
+  }
+});
 
-    if (actionData.msgId === 'preview') {
-      console.log('👆 Preview help button clicked (non-functional)');
-      return;
-    }
+// View Scheduled Messages
+app.action('view_scheduled', async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    await client.views.update({
+      view_id: body.view.id,
+      hash: body.view.hash, // Include hash
+      view: ModalBuilder.viewScheduledMessages(body.user.id)
+    });
+  } catch (error) {
+    console.error('Error viewing scheduled messages:', error);
+  }
+});
 
-    if (alertChannels.length === 0) {
-      await client.chat.postEphemeral({
-        channel,
-        user,
-        text: '❌ No alert channels configured for this help button.'
-      });
-      return;
-    }
+// Handle Schedule Type Change
+app.action('schedule_type_select', async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    const selectedType = body.actions[0].selected_option.value;
+    const currentMetadata = JSON.parse(body.view.private_metadata || '{}');
+    
+    const updatedMetadata = {
+      ...currentMetadata,
+      scheduleType: selectedType
+    };
+    
+    await client.views.update({
+      view_id: body.view.id,
+      hash: body.view.hash, // Include hash
+      view: ModalBuilder.messageScheduler(updatedMetadata)
+    });
+  } catch (error) {
+    console.error('Error updating schedule type:', error);
+  }
+});
 
-    let successCount = 0;
-    for (const alertChannel of alertChannels) {
-      try {
-        await client.chat.postMessage({
-          channel: alertChannel,
-          text: `🆘 <@${user}> needs backup in <#${channel}> ${cat()}`
+// Handle Message Actions (Edit, Delete, Pause, Resume, Send Now)
+app.action(/^message_actions_.*/, async ({ body, ack, client }) => {
+  await ack();
+  
+  try {
+    const selectedOption = body.actions[0].selected_option;
+    const [action, messageId] = selectedOption.value.split('_');
+    
+    switch (action) {
+      case 'edit':
+        const messageToEdit = scheduledMessages.get(messageId);
+        if (messageToEdit) {
+          await client.views.push({
+            trigger_id: body.trigger_id,
+            view: ModalBuilder.messageScheduler({
+              messageId,
+              channel: messageToEdit.channel,
+              message: messageToEdit.message,
+              scheduleType: messageToEdit.scheduleType,
+              date: messageToEdit.date,
+              time: messageToEdit.time,
+              frequency: messageToEdit.frequency
+            })
+          });
+        }
+        break;
+        
+      case 'delete':
+        await client.views.push({
+          trigger_id: body.trigger_id,
+          view: ModalBuilder.deleteConfirmation(messageId)
         });
-        successCount++;
-      } catch (e) {
-        console.error(`❌ Alert failed for channel ${alertChannel}:`, e);
+        break;
+        
+      case 'pause':
+        const messageToPause = scheduledMessages.get(messageId);
+        if (messageToPause) {
+          messageToPause.status = 'paused';
+          
+          const job = activeJobs.get(messageId);
+          if (job) {
+            job.cancel();
+            activeJobs.delete(messageId);
+          }
+          
+          await client.views.update({
+            view_id: body.view.id,
+            hash: body.view.hash, // Include hash
+            view: ModalBuilder.viewScheduledMessages(body.user.id)
+          });
+          
+          await client.chat.postEphemeral({
+            channel: body.user.id,
+            user: body.user.id,
+            text: '⏸️ Message paused successfully'
+          });
+        }
+        break;
+        
+      case 'resume':
+        const messageToResume = scheduledMessages.get(messageId);
+        if (messageToResume) {
+          messageToResume.status = 'active';
+          scheduleMessage(client, messageToResume);
+          
+          await client.views.update({
+            view_id: body.view.id,
+            hash: body.view.hash, // Include hash
+            view: ModalBuilder.viewScheduledMessages(body.user.id)
+          });
+          
+          await client.chat.postEphemeral({
+            channel: body.user.id,
+            user: body.user.id,
+            text: '▶️ Message resumed successfully'
+          });
+        }
+        break;
+        
+      case 'send':
+        const messageToSend = scheduledMessages.get(messageId);
+        if (messageToSend) {
+          await client.chat.postMessage({
+            channel: messageToSend.channel,
+            text: messageToSend.message
+          });
+          
+          await client.chat.postEphemeral({
+            channel: body.user.id,
+            user: body.user.id,
+            text: '📤 Message sent successfully!'
+          });
+        }
+        break;
+    }
+  } catch (error) {
+    console.error('Error handling message action:', error);
+  }
+});
+
+// ============================================
+// VIEW SUBMISSION HANDLERS
+// ============================================
+
+// Handle Poll Creation
+app.view('poll_creator', async ({ ack, body, view, client }) => {
+  const values = view.state.values;
+  const metadata = JSON.parse(view.private_metadata || '{}');
+  
+  const errors = {};
+  
+  const question = values.poll_question?.question_input?.value;
+  if (!question || question.trim().length === 0) {
+    errors.poll_question = "Please enter a poll question";
+  }
+  
+  const channel = values.poll_channel?.channel_select?.selected_channel;
+  if (!channel) {
+    errors.poll_channel = "Please select a channel";
+  }
+  
+  const options = [];
+  if (metadata.template === 'custom') {
+    for (let i = 0; i < 10; i++) {
+      const blockId = `option_${i}`;
+      if (values[blockId]) {
+        const value = values[blockId][`option_input_${i}`]?.value;
+        if (value && value.trim()) {
+          options.push(value.trim());
+        }
       }
     }
-
+    
+    if (options.length < 2) {
+      errors.option_0 = "Please provide at least 2 options";
+    }
+  } else {
+    options.push(...POLL_TEMPLATES[metadata.template].options);
+  }
+  
+  const uniqueOptions = new Set(options);
+  if (uniqueOptions.size !== options.length) {
+    errors.option_1 = "Options must be unique";
+  }
+  
+  if (Object.keys(errors).length > 0) {
+    await ack({
+      response_action: 'errors',
+      errors
+    });
+    return;
+  }
+  
+  const pollId = generateId();
+  const poll = {
+    id: pollId,
+    question: question.trim(),
+    options,
+    channel,
+    creator: body.user.id,
+    created: new Date().toISOString(),
+    votes: {},
+    status: 'active',
+    allowMultiple: values.multiple_choice?.multiple_toggle?.selected_options?.length > 0,
+    anonymous: values.anonymous_voting?.anonymous_toggle?.selected_options?.length > 0,
+    timeLimit: values.time_limit?.time_select?.selected_option?.value || 'none'
+  };
+  
+  polls.set(pollId, poll);
+  
+  try {
+    const result = await client.chat.postMessage({
+      channel,
+      blocks: generatePollBlocks(poll),
+      text: `Poll: ${question}`
+    });
+    
+    poll.messageTs = result.ts;
+    
+    if (poll.timeLimit !== 'none') {
+      const minutes = parseInt(poll.timeLimit);
+      setTimeout(async () => {
+        poll.status = 'closed';
+        await postPollResults(client, poll);
+      }, minutes * 60 * 1000);
+    }
+    
+    await ack();
+    
     await client.chat.postEphemeral({
       channel,
-      user,
-      text: `✅ Backup request sent to ${successCount}/${alertChannels.length} channels.`
+      user: body.user.id,
+      text: `✅ Your poll "${question}" has been created!`
     });
-
-    if (successCount > 0) {
-      await client.chat.postMessage({
-        channel,
-        text: `🆘 <@${user}> has requested backup assistance ${cat()}`
-      });
-    }
-
-    console.log(`🆘 Help request: User ${user} alerted ${successCount} channels`);
-
+    
   } catch (error) {
-    console.error('❌ Error handling help button:', error);
+    console.error('Error posting poll:', error);
+    await ack({
+      response_action: 'errors',
+      errors: {
+        poll_channel: "Failed to post poll. Please check bot permissions."
+      }
+    });
   }
 });
 
-// ================================
-// DEBUG COMMANDS
-// ================================
-app.command('/cat-debug', async ({ ack, body, client }) => {
+// Handle Schedule Message Submission
+app.view('schedule_message', async ({ ack, body, view, client }) => {
+  const values = view.state.values;
+  const metadata = JSON.parse(view.private_metadata || '{}');
+  
+  const errors = {};
+  
+  const channel = values.message_channel?.channel_select?.selected_channel;
+  if (!channel) {
+    errors.message_channel = "Please select a channel";
+  }
+  
+  const message = values.message_content?.message_input?.value;
+  if (!message || message.trim().length === 0) {
+    errors.message_content = "Please enter a message";
+  }
+  
+  if (Object.keys(errors).length > 0) {
+    await ack({
+      response_action: 'errors',
+      errors
+    });
+    return;
+  }
+  
+  const messageId = metadata.messageId || generateId();
+  const scheduledMessage = {
+    id: messageId,
+    userId: body.user.id,
+    channel,
+    message: message.trim(),
+    scheduleType: values.schedule_type?.schedule_type_select?.selected_option?.value || 'one_time',
+    date: values.schedule_date?.date_select?.selected_date,
+    time: values.schedule_time?.time_select?.selected_time,
+    frequency: values.recurring_options?.recurring_frequency?.selected_option?.value,
+    status: 'active',
+    created: new Date().toISOString()
+  };
+  
+  scheduledMessages.set(messageId, scheduledMessage);
+  scheduleMessage(client, scheduledMessage);
+  
   await ack();
-  const channelId = body.channel_id;
-  const userId = body.user_id;
+  
+  await client.chat.postEphemeral({
+    channel: scheduledMessage.channel,
+    user: body.user.id,
+    text: `✅ Your message has been scheduled successfully!`
+  });
+});
 
-  try {
-    const debugInfo = `🐱 *Cat Scratch Bot Debug Info*${cat()}\n\n` +
-      `*Status:* Running ✅\n` +
-      `*Uptime:* ${Math.floor(process.uptime())} seconds\n` +
-      `*Scheduled Messages:* ${scheduledMessages.length}\n` +
-      `*Active Jobs:* ${jobs.size}\n` +
-      `*Poll Data:* ${Object.keys(pollVotes).length} polls\n` +
-      `*Memory Usage:* ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
-      `*Current EST Time:* ${currentTimeInEST()}\n` +
-      `*View Registry:* ${viewRegistry.size} active views\n` +
-      `*Session Data:* ${sessionData.size} active sessions`;
-
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: debugInfo
+// Handle Edit Message Submission
+app.view('edit_scheduled_message', async ({ ack, body, view, client }) => {
+  const values = view.state.values;
+  const metadata = JSON.parse(view.private_metadata || '{}');
+  const messageId = metadata.messageId;
+  
+  if (!messageId) {
+    await ack({
+      response_action: 'errors',
+      errors: {
+        message_content: "Message ID not found"
+      }
     });
+    return;
+  }
+  
+  const oldJob = activeJobs.get(messageId);
+  if (oldJob) {
+    oldJob.cancel();
+    activeJobs.delete(messageId);
+  }
+  
+  const updatedMessage = {
+    id: messageId,
+    userId: body.user.id,
+    channel: values.message_channel?.channel_select?.selected_channel,
+    message: values.message_content?.message_input?.value?.trim(),
+    scheduleType: values.schedule_type?.schedule_type_select?.selected_option?.value || 'one_time',
+    date: values.schedule_date?.date_select?.selected_date,
+    time: values.schedule_time?.time_select?.selected_time,
+    frequency: values.recurring_options?.recurring_frequency?.selected_option?.value,
+    status: 'active',
+    updated: new Date().toISOString()
+  };
+  
+  scheduledMessages.set(messageId, updatedMessage);
+  scheduleMessage(client, updatedMessage);
+  
+  await ack();
+  
+  await client.chat.postEphemeral({
+    channel: updatedMessage.channel,
+    user: body.user.id,
+    text: `✅ Your scheduled message has been updated!`
+  });
+});
 
-    console.log(`🔧 Debug info requested by user ${userId}`);
-  } catch (error) {
-    console.error('❌ Debug command failed:', error);
+// Handle Delete Confirmation
+app.view('confirm_delete_message', async ({ ack, body, view, client }) => {
+  const messageId = view.private_metadata;
+  
+  const job = activeJobs.get(messageId);
+  if (job) {
+    job.cancel();
+    activeJobs.delete(messageId);
+  }
+  
+  const message = scheduledMessages.get(messageId);
+  scheduledMessages.delete(messageId);
+  
+  await ack();
+  
+  if (message) {
     await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: '❌ Debug failed - check console logs'
+      channel: message.channel,
+      user: body.user.id,
+      text: `🗑️ Scheduled message has been deleted successfully.`
     });
   }
 });
 
-// ================================
-// ERROR HANDLING & DEBUG LOGGING
-// ================================
-app.error(async (error) => {
-  console.error('🔥 Slack App Error:', error);
-});
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
 
-// Debug logging for troubleshooting - REMOVE AFTER TESTING
-app.view(/.*/, async ({ body }) => {
-  console.log(`🔍 VIEW SUBMISSION: ${body.view.callback_id} by user ${body.user.id}`);
-  // Don't ack here - let specific handlers do it
-});
-
-app.action(/.*/, async ({ body, action }) => {
-  console.log(`🔍 ACTION: ${action.action_id} (value: ${action.value}) by user ${body.user.id}`);
-  // Don't ack here - let specific handlers do it
-});
-
-// Cleanup expired messages every hour
-cron.schedule('0 * * * *', () => {
-  console.log('🧹 Running hourly cleanup...');
-
-  const beforeCount = scheduledMessages.length;
-  scheduledMessages = scheduledMessages.filter(msg => {
-    if (msg.repeat !== 'none') return true;
-    const isPast = isDateTimeInPast(msg.date, msg.time);
-    if (isPast && jobs.has(msg.id)) {
-      try {
-        jobs.get(msg.id).destroy();
-        jobs.delete(msg.id);
-        console.log(`🗑️ Cleaned up expired job: ${msg.id}`);
-      } catch (e) {
-        console.error(`❌ Error cleaning up job ${msg.id}:`, e);
+function generatePollBlocks(poll) {
+  const blocks = [
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: '📊 ' + poll.question,
+        emoji: true
       }
     }
-    return !isPast;
+  ];
+  
+  const info = [];
+  if (poll.allowMultiple) info.push('✓ Multiple selections allowed');
+  if (poll.anonymous) info.push('🔒 Anonymous voting');
+  if (poll.timeLimit !== 'none') info.push(`⏱️ Closes in ${poll.timeLimit} minutes`);
+  
+  if (info.length > 0) {
+    blocks.push({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: info.join(' • ')
+        }
+      ]
+    });
+  }
+  
+  blocks.push({ type: 'divider' });
+  
+  const elements = [];
+  poll.options.forEach((option, index) => {
+    const voteCount = Object.values(poll.votes || {})
+      .filter(votes => votes.includes(option)).length;
+    
+    elements.push({
+      type: 'button',
+      text: {
+        type: 'plain_text',
+        text: `${option} (${voteCount})`,
+        emoji: true
+      },
+      action_id: `poll_vote_${poll.id}_${index}`,
+      value: option
+    });
   });
-
-  if (scheduledMessages.length !== beforeCount) {
-    saveMessages();
-    console.log(`🧹 Removed ${beforeCount - scheduledMessages.length} expired messages`);
+  
+  for (let i = 0; i < elements.length; i += 5) {
+    blocks.push({
+      type: 'actions',
+      elements: elements.slice(i, i + 5)
+    });
   }
+  
+  const totalVotes = Object.keys(poll.votes || {}).length;
+  blocks.push({
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: `Total votes: ${totalVotes} • Created by <@${poll.creator}>`
+      }
+    ]
+  });
+  
+  return blocks;
+}
 
-  viewRegistry.clear();
-  console.log('🧹 Cleared view registry');
-}, { timezone: 'America/New_York' });
-
-// Memory management
-setInterval(() => {
-  const used = process.memoryUsage();
-  const mb = (bytes) => Math.round(bytes / 1024 / 1024);
-  console.log(`💾 Memory usage: ${mb(used.heapUsed)}MB heap, ${mb(used.rss)}MB RSS`);
-
-  if (mb(used.heapUsed) > 200) {
-    userProfileCache.clear();
-    console.log('🧹 Cleared user profile cache due to high memory usage');
+async function updatePollMessage(client, poll) {
+  if (!poll.messageTs) return;
+  
+  try {
+    await client.chat.update({
+      channel: poll.channel,
+      ts: poll.messageTs,
+      blocks: generatePollBlocks(poll),
+      text: `Poll: ${poll.question}`
+    });
+  } catch (error) {
+    console.error('Error updating poll message:', error);
   }
-}, 600000);
+}
 
-// ================================
-// STARTUP SEQUENCE
-// ================================
+async function postPollResults(client, poll) {
+  const totalVotes = Object.keys(poll.votes || {}).length;
+  const voteCounts = {};
+  
+  poll.options.forEach(option => {
+    voteCounts[option] = Object.values(poll.votes || {})
+      .filter(votes => votes.includes(option)).length;
+  });
+  
+  const sortedOptions = poll.options.sort((a, b) => voteCounts[b] - voteCounts[a]);
+  
+  const blocks = [
+    {
+      type: 'header',
+      text: {
+        type: 'plain_text',
+        text: '🏁 Poll Closed: ' + poll.question,
+        emoji: true
+      }
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*Final Results:*'
+      }
+    }
+  ];
+  
+  sortedOptions.forEach((option, index) => {
+    const votes = voteCounts[option];
+    const percentage = totalVotes > 0 ? Math.round((votes / totalVotes) * 100) : 0;
+    const bar = ModalBuilder.generateProgressBar(percentage);
+    
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `${index + 1}. *${option}*\n${bar} ${percentage}% (${votes} votes)`
+      }
+    });
+  });
+  
+  blocks.push({
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: `Total participants: ${totalVotes} • Poll by <@${poll.creator}>`
+      }
+    ]
+  });
+  
+  await client.chat.postMessage({
+    channel: poll.channel,
+    blocks,
+    text: `Poll closed: ${poll.question}`
+  });
+}
+
+function scheduleMessage(client, message) {
+  const existingJob = activeJobs.get(message.id);
+  if (existingJob) {
+    existingJob.cancel();
+  }
+  
+  if (message.scheduleType === 'one_time') {
+    const [hours, minutes] = message.time.split(':');
+    const scheduledDate = new Date(message.date);
+    scheduledDate.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+    
+    if (scheduledDate > new Date()) {
+      const job = schedule.scheduleJob(scheduledDate, async () => {
+        await sendScheduledMessage(client, message);
+        message.status = 'completed';
+        activeJobs.delete(message.id);
+      });
+      
+      activeJobs.set(message.id, job);
+    }
+  } else if (message.scheduleType === 'recurring') {
+    const [hours, minutes] = message.time.split(':');
+    let cronPattern;
+    
+    if (message.frequency === 'daily') {
+      cronPattern = `${minutes} ${hours} * * *`;
+    } else if (message.frequency === 'weekly') {
+      cronPattern = `${minutes} ${hours} * * 1`; // Every Monday
+    } else if (message.frequency === 'monthly') {
+      cronPattern = `${minutes} ${hours} 1 * *`; // First day of month
+    } else {
+      return;
+    }
+    
+    const job = schedule.scheduleJob(cronPattern, async () => {
+      await sendScheduledMessage(client, message);
+    });
+    
+    activeJobs.set(message.id, job);
+  }
+}
+
+async function sendScheduledMessage(client, message) {
+  try {
+    await client.chat.postMessage({
+      channel: message.channel,
+      text: message.message,
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: message.message
+          }
+        },
+        {
+          type: 'context',
+          elements: [
+            {
+              type: 'mrkdwn',
+              text: `_Scheduled message from <@${message.userId}>_`
+            }
+          ]
+        }
+      ]
+    });
+    
+    console.log(`Sent scheduled message: ${message.id}`);
+  } catch (error) {
+    console.error('Error sending scheduled message:', error);
+  }
+}
+
+// ============================================
+// ERROR HANDLER
+// ============================================
+
+app.error(async (error) => {
+  console.error('Global error handler:', error);
+});
+
+// ============================================
+// INITIALIZATION & STARTUP
+// ============================================
+
+async function initializeScheduledMessages(client) {
+  for (const [messageId, message] of scheduledMessages.entries()) {
+    if (message.status === 'active') {
+      scheduleMessage(client, message);
+    }
+  }
+  console.log(`Initialized ${scheduledMessages.size} scheduled messages`);
+}
+
+// Start the app
 (async () => {
   try {
-    loadMessages();
-    loadPollData();
     await app.start();
-
-    console.log('🐱 Cat Scratch Slack Bot is running in Socket Mode!');
-    console.log('🤖 Ready to handle /cat commands');
-    console.log('📡 Socket Mode: Enabled (no Request URLs needed)');
-    console.log(`📂 Loaded ${scheduledMessages.length} scheduled messages`);
-    console.log(`📊 Loaded poll data for ${Object.keys(pollVotes).length} polls`);
-
-    reRegisterAllJobs();
-
-    console.log(`⚡ Active jobs: ${jobs.size}`);
-    console.log(`🕐 Current EST time: ${currentTimeInEST()}`);
+    await initializeScheduledMessages(app.client);
     
-    const domain = process.env.REPLIT_DEV_DOMAIN || process.env.REPLIT_DOMAINS;
-    if (domain) {
-      console.log(`🔗 Cron job URL: https://${domain}/ping`);
-    }
-    console.log('🔗 Health check available at: /ping and /health');
-    console.log('📱 Bot features:');
-    console.log('   • Daily Check-ins with reactions');
-    console.log('   • Help Buttons with alerts');
-    console.log('   • Interactive Polls with voting');
-    console.log('   • Blank Messages');
-    console.log('   • Full scheduling system');
-    console.log('   • Message management');
-    console.log('✅ All systems ready! Use /cat to start.');
-
+    console.log('⚡️ Enhanced Slack Bot is running!');
+    console.log('✅ Features enabled:');
+    console.log('   - Interactive Polls with Templates');
+    console.log('   - Scheduled Messages with Edit/Delete');
+    console.log('   - Fixed Navigation with Hash Management');
+    console.log('   - Real-time Updates');
+    console.log('\nUse /bot command to get started!');
+    
   } catch (error) {
-    console.error('❌ Failed to start the app:', error);
-    process.exit(1);
+    console.error('Failed to start app:', error);
   }
 })();
-
-// ================================
-// GRACEFUL SHUTDOWN
-// ================================
-process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received, shutting down gracefully...');
-  saveMessages();
-  savePollData();
-  jobs.forEach((job, id) => {
-    try {
-      job.destroy();
-      console.log(`🧹 Destroyed job: ${id}`);
-    } catch (e) {
-      console.log(`❌ Could not destroy job ${id}: ${e.message}`);
-    }
-  });
-  console.log('👋 Shutdown complete');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('🛑 SIGINT received, shutting down gracefully...');
-  saveMessages();
-  savePollData();
-  jobs.forEach((job, id) => {
-    try {
-      job.destroy();
-      console.log(`🧹 Destroyed job: ${id}`);
-    } catch (e) {
-      console.log(`❌ Could not destroy job ${id}: ${e.message}`);
-    }
-  });
-  console.log('👋 Shutdown complete');
-  process.exit(0);
-});
-
-module.exports = { app, ModalBuilder };
