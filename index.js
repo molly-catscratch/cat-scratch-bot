@@ -505,7 +505,7 @@ class ViewBuilder {
 // Common handlers (Slash command entrypoint)
 // ============================================
 
-app.command('/pm', async ({ ack, body, client, logger }) => {
+app.command('/cat', async ({ ack, body, client, logger }) => {
   await ack();
   try {
     await client.views.open({
