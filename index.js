@@ -1,2212 +1,1344 @@
-// ================================
-// CAT SCRATCH SLACK BOT - FIXED VERSION WITH PROPER NAVIGATION
-// ================================
+/**
+ * PM Squad Bot - Unified (Polls + Scheduler)
+ * - Navigation uses views.update() (no views.push)
+ * - Per-user session state stored in dataStore.userSessions
+ * - Centralized submit handlers:
+ *    - handleSubmitMessage
+ *    - handleSubmitPoll
+ * - Clear, direct action_ids for overflow/edit/delete/close
+ * - ViewBuilder class abstracts modal builders (clean & reusable)
+ *
+ * ENV: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_SIGNING_SECRET
+ *
+ * npm packages: @slack/bolt node-cron node-schedule (or none if not using schedule),
+ *               dotenv
+ */
 
-const { App } = require('@slack/bolt');
-const express = require('express');
+const { App, LogLevel } = require('@slack/bolt');
 const cron = require('node-cron');
+const schedule = require('node-schedule'); // used for one-off scheduling
 const fs = require('fs');
 require('dotenv').config();
 
-// ================================
-// KEEP-ALIVE SERVER
-// ================================
-const keep_alive = express();
+// ============================================
+// Initialization
+// ============================================
 
-keep_alive.get('/', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Cat Scratch Bot</title>
-        <style>
-            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f0f0f0; }
-            .container { background: white; padding: 30px; border-radius: 10px; display: inline-block; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            .status { color: #28a745; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🐱 Cat Scratch Bot is Alive!</h1>
-            <p class="status">Status: Running ✅</p>
-            <p>Uptime: ${Math.floor(process.uptime())} seconds</p>
-            <p>Time: ${new Date().toLocaleString()}</p>
-            <p>Ready to handle /cat commands!</p>
-            <p>Scheduled Messages: ${scheduledMessages.length}</p>
-        </div>
-    </body>
-    </html>
-  `);
-});
-
-keep_alive.get('/health', (req, res) => {
-  res.json({ 
-    status: 'alive',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    bot: 'Cat Scratch Bot',
-    scheduledMessages: scheduledMessages.length,
-    activeJobs: jobs.size
-  });
-});
-
-keep_alive.get('/ping', (req, res) => {
-  res.send('pong 🏓');
-});
-
-const PORT = process.env.PORT || 3000;
-keep_alive.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Keep-alive server running on port ${PORT}`);
-});
-
-// ================================
-// SLACK BOT INITIALIZATION
-// ================================
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   appToken: process.env.SLACK_APP_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
-  socketMode: true
-  // No port needed for Socket Mode - Express server handles HTTP
+  socketMode: true,
+  logLevel: process.env.NODE_ENV === 'production' ? LogLevel.INFO : LogLevel.DEBUG,
+  port: process.env.PORT || 3000
 });
 
-// ================================
-// STORAGE & STATE MANAGEMENT
-// ================================
+// ============================================
+// Persistent storage (simple file-based) & runtime stores
+// ============================================
+
 const SCHEDULE_FILE = './scheduledMessages.json';
-const POLLS_FILE = './pollData.json';
 let scheduledMessages = [];
-const jobs = new Map();
-let pollVotes = {};
-const pollMessages = new Map();
-let openEndedResponses = {};
-const userProfileCache = new Map();
-const sessionData = new Map();
-
-// Storage functions
-function saveMessages() {
-  try {
-    fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(scheduledMessages, null, 2));
-    console.log(`💾 Saved ${scheduledMessages.length} scheduled messages`);
-  } catch (e) {
-    console.error('❌ Save messages failed:', e);
-  }
-}
-
-function savePollData() {
-  try {
-    const pollData = {
-      votes: pollVotes,
-      responses: openEndedResponses,
-      messages: Array.from(pollMessages.entries()).map(([id, data]) => [id, data])
-    };
-    fs.writeFileSync(POLLS_FILE, JSON.stringify(pollData, null, 2));
-    console.log(`💾 Saved poll data for ${Object.keys(pollVotes).length} polls`);
-  } catch (e) {
-    console.error('❌ Save poll data failed:', e);
-  }
-}
-
-function loadMessages() {
-  if (fs.existsSync(SCHEDULE_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(SCHEDULE_FILE));
-      console.log(`📂 Loading ${data.length} messages from storage`);
-
-      scheduledMessages = data.filter(msg => {
-        if (msg.repeat && msg.repeat !== 'none') {
-          return true;
-        }
-        const isPast = isDateTimeInPast(msg.date, msg.time);
-        return !isPast;
-      });
-
-      console.log(`📂 Loaded ${scheduledMessages.length} valid messages after filtering`);
-      if (scheduledMessages.length !== data.length) {
-        saveMessages();
-      }
-    } catch (e) {
-      console.error('❌ Load messages failed:', e);
-      scheduledMessages = [];
-    }
-  }
-}
-
-function loadPollData() {
-  if (fs.existsSync(POLLS_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(POLLS_FILE));
-      pollVotes = data.votes || {};
-      openEndedResponses = data.responses || {};
-      if (data.messages) {
-        data.messages.forEach(([id, messageData]) => {
-          pollMessages.set(id, messageData);
-        });
-      }
-      console.log(`📊 Loaded poll data for ${Object.keys(pollVotes).length} polls`);
-    } catch (e) {
-      console.error('❌ Load poll data failed:', e);
-      pollVotes = {};
-      openEndedResponses = {};
-    }
-  }
-}
-
-// ================================
-// UTILITIES
-// ================================
-const generateId = () => `msg_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-const cat = () => Math.random() < 0.35 ? ` ${['₍^. .^₎⟆', 'ᓚ₍ ^. .^₎', 'ฅ^•ﻌ•^ฅ'][Math.floor(Math.random() * 3)]}` : '';
-
-function todayInEST() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
-}
-
-function currentTimeInEST() {
-  return new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'America/New_York',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  }).format(new Date());
-}
-
-function formatTimeDisplay(timeStr) {
-  if (!timeStr) return 'Invalid Time';
-  const [hour, minute] = timeStr.split(':').map(Number);
-  const period = hour >= 12 ? 'PM' : 'AM';
-  const displayHour = hour > 12 ? hour - 12 : hour === 0 ? 12 : hour;
-  return `${displayHour}:${minute.toString().padStart(2, '0')} ${period}`;
-}
-
-function formatDateDisplay(dateStr) {
-  if (!dateStr) return 'Invalid Date';
-  try {
-    const date = new Date(dateStr + 'T00:00:00');
-    return date.toLocaleDateString('en-US', { 
-      weekday: 'short', 
-      month: 'short', 
-      day: 'numeric',
-      year: 'numeric'
-    });
-  } catch (e) {
-    return 'Invalid Date';
-  }
-}
-
-function isDateTimeInPast(dateStr, timeStr) {
-  try {
-    const now = new Date();
-    const targetDateTime = new Date(`${dateStr}T${timeStr}:00`);
-    const nowEST = new Date(now.toLocaleString("en-US", {timeZone: "America/New_York"}));
-    const targetEST = new Date(targetDateTime.toLocaleString("en-US", {timeZone: "America/New_York"}));
-    return targetEST <= nowEST;
-  } catch (error) {
-    console.error('❌ Timezone calculation error:', error);
-    return false;
-  }
-}
-
-function extractFormData(view) {
-  const values = view.state.values;
-  const data = {};
-
-  // Extract basic content
-  if (values.message_content?.message_text?.value) {
-    data.text = values.message_content.message_text.value.trim();
-  }
-  if (values.message_content?.message_text?.rich_text_value) {
-    data.richText = values.message_content.message_text.rich_text_value;
-  }
-
-  // Extract alert channels for help button
-  if (values.alert_channels?.alert_channels_select?.selected_conversations) {
-    data.alertChannels = values.alert_channels.alert_channels_select.selected_conversations;
-  }
-
-  // Extract poll data
-  if (values.poll_question?.poll_question_text?.value) {
-    data.text = values.poll_question.poll_question_text.value.trim();
-  }
-  if (values.poll_options?.poll_options_text?.value) {
-    data.pollOptions = values.poll_options.poll_options_text.value.trim();
-  }
-
-  // Extract scheduling data
-  if (values.target_channel?.channel_select?.selected_conversation) {
-    data.targetChannel = values.target_channel.channel_select.selected_conversation;
-  }
-  if (values.schedule_timing?.date_picker?.selected_date) {
-    data.scheduleDate = values.schedule_timing.date_picker.selected_date;
-  }
-  if (values.schedule_timing?.time_picker?.selected_time) {
-    data.scheduleTime = values.schedule_timing.time_picker.selected_time;
-  }
-  if (values.repeat_options?.repeat_select?.selected_option) {
-    data.repeatValue = values.repeat_options.repeat_select.selected_option.value;
-    data.repeatOption = values.repeat_options.repeat_select.selected_option.text.text;
-  }
-
-  // Extract send now channel
-  if (values.send_channel?.immediate_channel_select?.selected_conversation) {
-    data.sendChannel = values.send_channel.immediate_channel_select.selected_conversation;
-  }
-
-  return data;
-}
-
-// ================================
-// MESSAGE TEMPLATES
-// ================================
-const templates = {
-  daily_checkin: {
-    title: "Daily Bandwidth Check",
-    text: "How's everyone's capacity looking today?\n\nUse the reactions below to share your current workload:\n🟢 Light schedule - Ready for new work\n🟡 Manageable schedule\n🟠 Schedule is full, no new work\n🔴 Overloaded - Need help now"
-  },
-  help_button: {
-    title: "Need Backup?",
-    text: "If you're stuck or need assistance, click the button below to alert the team."
-  },
-  poll: "What would you like to ask the team?",
-  custom: ""
+const jobs = new Map();                 // cron/node-schedule jobs
+const dataStore = {
+  polls: new Map(),                     // pollId -> poll object
+  scheduledMessages: new Map(),         // msgId -> message object
+  activeJobs: new Map(),                // msgId -> job instance
+  userSessions: new Map()               // userId -> session form data
 };
 
-// ================================
-// MESSAGE GENERATION FUNCTIONS
-// ================================
-function generateMessageBlocks(type, data = {}) {
-  switch (type) {
-    case 'daily_checkin':
-      return [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: (data.title ? `*${data.title}*\n` : '') + (data.text || templates.daily_checkin.text) + cat()
-          }
-        }
-      ];
-
-    case 'help_button':
-      return [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: (data.title ? `*${data.title}*\n` : '') + (data.text || templates.help_button.text) + cat()
-          }
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              style: 'danger',
-              text: { type: 'plain_text', text: '🆘 Request Backup', emoji: true },
-              action_id: `help_click_${data.id || 'preview'}`,
-              value: JSON.stringify({
-                msgId: data.id || 'preview',
-                alertChannels: data.alertChannels || []
-              })
-            }
-          ]
-        }
-      ];
-
-    case 'poll':
-      const pollOptions = (data.pollOptions || 'Option 1\nOption 2\nOption 3').split('\n').filter(o => o.trim());
-      const blocks = [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*${data.text || templates.poll}* ${cat()}`
-          }
-        },
-        {
-          type: 'divider'
-        }
-      ];
-
-      const emojis = ['🍕', '🌮', '🍣', '🥗', '🍔', '🍝', '🥪', '🌯', '🍜', '🥘'];
-
-      pollOptions.forEach((option, index) => {
-        const emoji = emojis[index % emojis.length];
-        blocks.push(
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `${emoji} *${option.trim()}*`
-            },
-            accessory: {
-              type: 'button',
-              text: { type: 'plain_text', text: 'Vote', emoji: true },
-              action_id: `poll_vote_${data.id || 'preview'}`,
-              value: JSON.stringify({ 
-                pollId: data.id || 'preview', 
-                optionIndex: index, 
-                option: option.trim() 
-              })
-            }
-          },
-          {
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: '0 votes'
-            }]
-          }
-        );
-      });
-
-      return blocks;
-
-    case 'custom':
-    default:
-      if (data.richText && data.richText.elements) {
-        return [
-          {
-            type: 'rich_text',
-            elements: data.richText.elements
-          }
-        ];
-      } else {
-        return [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: (data.title ? `*${data.title}*\n` : '') + (data.text || 'Your custom message content') + cat()
-            }
-          }
-        ];
-      }
-  }
-}
-
-// ================================
-// MESSAGE SENDING FUNCTIONS
-// ================================
-async function sendMessage(msg) {
+// Load scheduled messages from disk (best-effort)
+function loadScheduledMessages() {
   try {
-    if (!msg.channel) {
-      console.error('❌ No channel specified for message');
-      return false;
-    }
-
-    // Verify channel access
-    try {
-      await app.client.conversations.info({ channel: msg.channel });
-    } catch (error) {
-      console.error(`❌ Channel access failed: ${error.data?.error}`);
-      return false;
-    }
-
-    if (msg.type === 'daily_checkin') {
-      const messageText = (msg.title ? `*${msg.title}*\n` : '') + (msg.text || templates.daily_checkin.text) + cat();
-
-      const result = await app.client.chat.postMessage({
-        channel: msg.channel,
-        text: messageText
-      });
-
-      // Add reactions for capacity check
-      if (result.ok && result.ts) {
-        const reactions = ['green_heart', 'yellow_heart', 'orange_heart', 'red_circle'];
-        for (const reaction of reactions) {
-          try {
-            await new Promise(resolve => setTimeout(resolve, 100));
-            await app.client.reactions.add({ 
-              channel: msg.channel, 
-              timestamp: result.ts, 
-              name: reaction 
-            });
-          } catch (e) {
-            console.error(`❌ Reaction failed: ${e.data?.error}`);
-          }
-        }
-      }
-    } else if (msg.type === 'help_button') {
-      const blocks = generateMessageBlocks('help_button', msg);
-      await app.client.chat.postMessage({
-        channel: msg.channel,
-        text: 'Help button message',
-        blocks
-      });
-    } else if (msg.type === 'poll') {
-      const pollId = msg.id;
-      const blocks = generateMessageBlocks('poll', msg);
-
-      // Initialize poll data
-      if (!pollVotes[pollId]) {
-        pollVotes[pollId] = {};
-        pollMessages.set(pollId, {
-          channel: msg.channel,
-          options: (msg.pollOptions || '').split('\n').filter(o => o.trim()),
-          question: msg.text || templates.poll
-        });
-        savePollData();
-      }
-
-      await app.client.chat.postMessage({
-        channel: msg.channel,
-        text: 'Poll message',
-        blocks
-      });
-    } else {
-      // Custom message
-      const blocks = generateMessageBlocks('custom', msg);
-      await app.client.chat.postMessage({
-        channel: msg.channel,
-        text: 'Custom message',
-        blocks
+    if (fs.existsSync(SCHEDULE_FILE)) {
+      const raw = fs.readFileSync(SCHEDULE_FILE, 'utf8');
+      const arr = JSON.parse(raw);
+      arr.forEach(m => {
+        dataStore.scheduledMessages.set(m.id, m);
       });
     }
-
-    console.log(`✅ ${msg.type} message sent to ${msg.channel}`);
-    return true;
   } catch (e) {
-    console.error('❌ Send failed:', e);
-    return false;
+    console.error('Failed to load scheduled messages:', e);
   }
 }
-
-// ================================
-// SCHEDULING FUNCTIONS
-// ================================
-function scheduleJob(msg) {
-  if (jobs.has(msg.id)) {
-    try {
-      jobs.get(msg.id).destroy();
-    } catch (e) {
-      console.error(`❌ Error destroying job: ${e.message}`);
-    }
-    jobs.delete(msg.id);
-  }
-
-  const [hh, mm] = msg.time.split(':').map(Number);
-  let cronExpr;
-
-  if (msg.repeat === 'daily') {
-    cronExpr = `${mm} ${hh} * * *`;
-  } else if (msg.repeat === 'weekly') {
-    const day = new Date(msg.date + 'T00:00:00').getDay();
-    cronExpr = `${mm} ${hh} * * ${day}`;
-  } else if (msg.repeat === 'monthly') {
-    const day = msg.date.split('-')[2];
-    cronExpr = `${mm} ${hh} ${day} * *`;
-  } else {
-    const [y, mon, d] = msg.date.split('-');
-    cronExpr = `${mm} ${hh} ${d} ${parseInt(mon)} *`;
-  }
-
-  console.log(`🕐 Creating job for ${msg.id}: ${cronExpr} (${msg.repeat})`);
-
+function saveScheduledMessages() {
   try {
-    const job = cron.schedule(cronExpr, async () => {
-      console.log(`⚡ Executing scheduled ${msg.type} message: ${msg.id}`);
+    const arr = Array.from(dataStore.scheduledMessages.values());
+    fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(arr, null, 2));
+  } catch (e) {
+    console.error('Failed to save scheduled messages:', e);
+  }
+}
+loadScheduledMessages();
 
-      try {
-        const success = await sendMessage(msg);
+// ============================================
+// Utilities
+// ============================================
 
-        if (success) {
-          console.log(`✅ Scheduled message executed successfully: ${msg.id}`);
-        } else {
-          console.error(`❌ Scheduled message execution failed: ${msg.id}`);
-        }
+const utils = {
+  generateId: (prefix = '') => `${prefix}${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+  todayInEST: () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date()),
+  formatTimeDisplay: (timeStr) => {
+    const [hour, minute] = timeStr.split(':').map(Number);
+    const period = hour >= 12 ? 'PM' : 'AM';
+    const displayHour = hour > 12 ? hour - 12 : hour === 0 ? 12 : hour;
+    return `${displayHour}:${minute.toString().padStart(2, '0')} ${period}`;
+  },
+  isDateTimeInPast: (dateStr, timeStr) => {
+    try {
+      const now = new Date();
+      const currentDateEST = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/New_York',
+        year: 'numeric', month: '2-digit', day: '2-digit'
+      }).format(now);
+      const currentTimeEST = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'America/New_York',
+        hour: '2-digit', minute: '2-digit', hour12: false
+      }).format(now);
 
-        if (msg.repeat === 'none') {
-          console.log(`🗑️ Removing one-time message: ${msg.id}`);
-          const messageIndex = scheduledMessages.findIndex(m => m.id === msg.id);
-          if (messageIndex >= 0) {
-            scheduledMessages.splice(messageIndex, 1);
-            saveMessages();
-          }
-          try {
-            job.destroy();
-            jobs.delete(msg.id);
-          } catch (cleanupError) {
-            console.error(`❌ Error cleaning up job: ${cleanupError}`);
-          }
-        }
-      } catch (executionError) {
-        console.error(`❌ Error in job execution for ${msg.id}:`, executionError);
+      if (dateStr !== currentDateEST) {
+        return dateStr < currentDateEST;
       }
-    }, {
-      timezone: 'America/New_York',
-      scheduled: true
-    });
-
-    if (job) {
-      jobs.set(msg.id, job);
-      console.log(`✅ Job created successfully for ${msg.id}`);
-      return true;
-    } else {
-      console.error(`❌ Failed to create job for ${msg.id}`);
+      return timeStr < currentTimeEST;
+    } catch (e) {
+      // conservative fallback: not in the past
+      console.error('isDateTimeInPast error', e);
       return false;
     }
-  } catch (error) {
-    console.error(`❌ Error creating scheduled job for ${msg.id}:`, error);
-    return false;
+  }
+};
+
+// Helper to safely pull values from view.state.values
+function getFormValue(values, blockId, actionId, type = 'value') {
+  try {
+    const block = values?.[blockId]?.[actionId];
+    if (!block) return null;
+    if (type === 'selected') return block?.selected_option?.value;
+    if (type === 'conversation') return block?.selected_conversation || block?.value || null;
+    if (type === 'conversations') return block?.selected_conversations || [];
+    if (type === 'time') return block?.selected_time || null;
+    if (type === 'date') return block?.selected_date || null;
+    return (block?.value || '').toString();
+  } catch (e) {
+    console.error('getFormValue error', e);
+    return null;
   }
 }
 
-function reRegisterAllJobs() {
-  console.log('🔄 Re-registering all scheduled jobs...');
-  let successCount = 0;
-  let failCount = 0;
-  let skippedCount = 0;
+// small cat flourish (copied from your older working file)
+const cat = () => Math.random() < 0.35 ? ` ${['₍^. .^₎⟆', 'ᓚ₍ ^. .^₎', 'ฅ^•ﻌ•^ฅ'][Math.floor(Math.random() * 3)]}` : '';
 
-  scheduledMessages.forEach((msg) => {
-    const shouldSchedule = msg.repeat !== 'none' || !isDateTimeInPast(msg.date, msg.time);
-    if (shouldSchedule) {
-      const success = scheduleJob(msg);
-      if (success) {
-        successCount++;
-      } else {
-        failCount++;
-      }
-    } else {
-      skippedCount++;
-    }
-  });
+// ============================================
+// ViewBuilder - builds modal views (reusable)
+ // We mirror the patterns from your older working version but keep abstraction for reuse
+// ============================================
 
-  console.log(`📊 Job registration complete: ${successCount} success, ${failCount} failed, ${skippedCount} skipped`);
-}
-
-// ================================
-// MODAL BUILDERS
-// ================================
-class ModalBuilder {
-  static createMainMenu(userId = null) {
+class ViewBuilder {
+  static menu() {
     return {
       type: 'modal',
-      callback_id: 'main_menu',
-      title: {
-        type: 'plain_text',
-        text: 'Cat Scratch Bot',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Close',
-        emoji: true
-      },
+      callback_id: 'scheduler_menu',
+      title: { type: 'plain_text', text: 'Cat Scratch Menu' },
+      close: { type: 'plain_text', text: 'Cancel' },
       blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: '*Choose a message type:*' } },
+        { type: 'divider' },
         {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*Welcome ${userId ? `<@${userId}>` : 'to Cat Scratch'}!*\n\nChoose a message type to get started:${cat()}`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*Team Management Messages*'
-          }
+          type: 'actions',
+          elements: [
+            { type: 'button', text: { type: 'plain_text', text: 'Capacity Check' }, action_id: 'nav_capacity' },
+            { type: 'button', text: { type: 'plain_text', text: 'Poll' }, action_id: 'nav_poll' }
+          ]
         },
         {
           type: 'actions',
           elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: 'Daily Check-In',
-                emoji: true
-              },
-              style: 'primary',
-              value: 'daily_checkin',
-              action_id: 'select_daily_checkin'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: 'Help Button',
-                emoji: true
-              },
-              style: 'danger',
-              value: 'help_button',
-              action_id: 'select_help_button'
-            }
+            { type: 'button', text: { type: 'plain_text', text: 'Help Button' }, action_id: 'nav_help' },
+            { type: 'button', text: { type: 'plain_text', text: 'Custom Message' }, action_id: 'nav_custom' }
           ]
         },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*Communication Tools*'
-          }
-        },
+        { type: 'divider' },
         {
           type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: 'Create Poll',
-                emoji: true
-              },
-              value: 'poll',
-              action_id: 'select_poll'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: 'Custom Message',
-                emoji: true
-              },
-              value: 'custom',
-              action_id: 'select_custom'
-            }
-          ]
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*Message Management*\nView and manage your scheduled messages'
-          },
-          accessory: {
-            type: 'button',
-            text: {
-              type: 'plain_text',
-              text: 'Manage Messages',
-              emoji: true
-            },
-            style: 'primary',
-            value: 'manage_messages',
-            action_id: 'manage_scheduled_messages'
-          }
-        },
-        {
-          type: 'context',
-          elements: [
-            {
-              type: 'mrkdwn',
-              text: '*Tip:* All messages can be scheduled for one-time or recurring delivery'
-            }
-          ]
+          elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Scheduled' }, action_id: 'nav_scheduled' }]
         }
       ]
     };
   }
 
-  static createSetupModal(type, data = {}) {
-    const titles = {
-      daily_checkin: '📊 Daily Check-In Setup',
-      help_button: '🆘 Help Button Setup',
-      poll: '📊 Poll Setup',
-      custom: '✨ Custom Message Setup'
-    };
-
-    const labels = {
-      daily_checkin: '📊 Check-In Message Template',
-      help_button: '🆘 Help Request Message',
-      poll: '❓ Poll Question',
-      custom: '✨ Message Content'
-    };
-
-    if (type === 'poll') {
-      return this.createPollSetupModal(data);
-    }
-
-    const initialValue = data.text || (templates[type] ? templates[type].text || templates[type] : '');
-
-    return {
-      type: 'modal',
-      callback_id: `${type}_setup`,
-      title: {
-        type: 'plain_text',
-        text: titles[type],
-        emoji: true
-      },
-      submit: {
-        type: 'plain_text',
-        text: 'Preview →',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*✏️ Step 1: Create your ${type.replace('_', ' ')} message*${cat()}`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'input',
-          block_id: 'message_content',
-          element: type === 'custom' ? {
-            type: 'rich_text_input',
-            action_id: 'message_text'
-          } : {
-            type: 'plain_text_input',
-            multiline: true,
-            action_id: 'message_text',
-            initial_value: initialValue,
-            placeholder: {
-              type: 'plain_text',
-              text: `Enter your ${type.replace('_', ' ')} message...`
-            }
-          },
-          label: {
-            type: 'plain_text',
-            text: labels[type],
-            emoji: true
-          }
-        },
-        ...(type === 'help_button' ? [{
-          type: 'input',
-          block_id: 'alert_channels',
-          element: {
-            type: 'multi_conversations_select',
-            action_id: 'alert_channels_select',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Select channels to alert...',
-              emoji: true
-            },
-            filter: {
-              include: ['public', 'private']
-            },
-            ...(data.alertChannels ? { initial_conversations: data.alertChannels } : {})
-          },
-          label: {
-            type: 'plain_text',
-            text: 'Alert Channels',
-            emoji: true
-          },
-          optional: true
-        }] : []),
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Back to Menu',
-                emoji: true
-              },
-              action_id: 'back_to_main_menu',
-              value: 'back'
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  static createPollSetupModal(data = {}) {
-    return {
-      type: 'modal',
-      callback_id: 'poll_setup',
-      title: {
-        type: 'plain_text',
-        text: '📊 Poll Setup',
-        emoji: true
-      },
-      submit: {
-        type: 'plain_text',
-        text: 'Preview →',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*✏️ Step 1: Create your poll*${cat()}`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'input',
-          block_id: 'poll_question',
-          element: {
-            type: 'plain_text_input',
-            multiline: true,
-            action_id: 'poll_question_text',
-            initial_value: data.text || templates.poll,
-            placeholder: {
-              type: 'plain_text',
-              text: 'Enter your poll question...'
-            }
-          },
-          label: {
-            type: 'plain_text',
-            text: '❓ Poll Question',
-            emoji: true
-          }
-        },
-        {
-          type: 'input',
-          block_id: 'poll_options',
-          element: {
-            type: 'plain_text_input',
-            multiline: true,
-            action_id: 'poll_options_text',
-            initial_value: data.pollOptions || 'Option 1\nOption 2\nOption 3',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Enter each option on a new line...'
-            }
-          },
-          label: {
-            type: 'plain_text',
-            text: '📝 Poll Options (one per line)',
-            emoji: true
-          }
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Back to Menu',
-                emoji: true
-              },
-              action_id: 'back_to_main_menu',
-              value: 'back'
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  static createPreviewModal(type, data = {}) {
-    const typeLabels = {
-      daily_checkin: '📊 Daily Check-In',
-      help_button: '🆘 Help Button',
-      poll: '📊 Poll',
-      custom: '✨ Custom Message'
-    };
-
-    return {
-      type: 'modal',
-      callback_id: 'message_preview',
-      title: {
-        type: 'plain_text',
-        text: '👀 Message Preview',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*👀 Step 2: Preview your ${typeLabels[type] || 'message'}*${cat()}`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        ...this.generatePreviewBlocks(type, data),
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '✏️ Edit Message',
-                emoji: true
-              },
-              value: type,
-              action_id: 'back_to_setup'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '📅 Schedule Message',
-                emoji: true
-              },
-              style: 'primary',
-              value: type,
-              action_id: 'go_to_scheduler'
-            },
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🚀 Send Now',
-                emoji: true
-              },
-              style: 'danger',
-              value: type,
-              action_id: 'send_now'
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  static createSchedulerModal(type, data = {}) {
-    const typeLabels = {
-      daily_checkin: '📊 Daily Check-In',
-      help_button: '🆘 Help Button',
-      poll: '📊 Poll',
-      custom: '✨ Custom Message'
-    };
-
-    return {
-      type: 'modal',
-      callback_id: 'message_scheduler',
-      submit: {
-        type: 'plain_text',
-        text: '🚀 Schedule Message',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      title: {
-        type: 'plain_text',
-        text: '📅 Schedule Message',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*📅 Step 3: Schedule your ${typeLabels[type] || 'message'}*${cat()}`
-          }
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'input',
-          block_id: 'target_channel',
-          element: {
-            type: 'conversations_select',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Select a channel',
-              emoji: true
-            },
-            action_id: 'channel_select',
-            filter: {
-              include: ['public', 'private']
-            },
-            ...(data.targetChannel ? { initial_conversation: data.targetChannel } : {})
-          },
-          label: {
-            type: 'plain_text',
-            text: '📍 Send to Channel',
-            emoji: true
-          }
-        },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*🕐 When to send this message:*'
-          }
-        },
-        {
-          type: 'actions',
-          block_id: 'schedule_timing',
-          elements: [
-            {
-              type: 'datepicker',
-              initial_date: data.scheduleDate || todayInEST(),
-              placeholder: {
-                type: 'plain_text',
-                text: 'Select date'
-              },
-              action_id: 'date_picker'
-            },
-            {
-              type: 'timepicker',
-              initial_time: data.scheduleTime || currentTimeInEST(),
-              placeholder: {
-                type: 'plain_text',
-                text: 'Select time (EST)'
-              },
-              action_id: 'time_picker'
-            }
-          ]
-        },
-        {
-          type: 'input',
-          block_id: 'repeat_options',
-          element: {
-            type: 'static_select',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Select repeat option'
-            },
-            options: [
-              { text: { type: 'plain_text', text: 'One-time only' }, value: 'none' },
-              { text: { type: 'plain_text', text: 'Daily' }, value: 'daily' },
-              { text: { type: 'plain_text', text: 'Weekly' }, value: 'weekly' },
-              { text: { type: 'plain_text', text: 'Monthly' }, value: 'monthly' }
-            ],
-            action_id: 'repeat_select',
-            initial_option: { text: { type: 'plain_text', text: 'One-time only' }, value: 'none' }
-          },
-          label: {
-            type: 'plain_text',
-            text: '🔄 Repeat Schedule',
-            emoji: true
-          },
-          optional: true
-        },
-        {
-          type: 'context',
-          elements: [{
-            type: 'mrkdwn',
-            text: '🕐 All times are in Eastern Time (EST). Messages will be sent at the scheduled time.'
-          }]
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Back to Preview',
-                emoji: true
-              },
-              action_id: 'back_to_preview',
-              value: type
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  static createSendNowModal(type, data = {}) {
-    const typeLabels = {
-      daily_checkin: '📊 Daily Check-In',
-      help_button: '🆘 Help Button',
-      poll: '📊 Poll',
-      custom: '✨ Custom Message'
-    };
-
-    return {
-      type: 'modal',
-      callback_id: 'send_now_confirm',
-      title: {
-        type: 'plain_text',
-        text: '🚀 Send Immediately',
-        emoji: true
-      },
-      submit: {
-        type: 'plain_text',
-        text: '🚀 Send Now',
-        emoji: true
-      },
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-        emoji: true
-      },
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: `*Ready to send your ${typeLabels[type] || 'message'}!*${cat()}\n\nSelect a channel to send it to:`
-          }
-        },
-        {
-          type: 'input',
-          block_id: 'send_channel',
-          element: {
-            type: 'conversations_select',
-            placeholder: {
-              type: 'plain_text',
-              text: 'Select a channel',
-              emoji: true
-            },
-            action_id: 'immediate_channel_select',
-            filter: {
-              include: ['public', 'private']
-            }
-          },
-          label: {
-            type: 'plain_text',
-            text: '📍 Send to Channel',
-            emoji: true
-          }
-        },
-        {
-          type: 'context',
-          elements: [
-            {
-              type: 'mrkdwn',
-              text: '💡 This will send your message immediately to the selected channel'
-            }
-          ]
-        },
-        {
-          type: 'divider'
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '← Back to Preview',
-                emoji: true
-              },
-              action_id: 'back_to_preview',
-              value: type
-            }
-          ]
-        }
-      ]
-    };
-  }
-
-  static createMessageManagerModal(scheduledMessages = []) {
+  static scheduledList(userId) {
+    const messages = Array.from(dataStore.scheduledMessages.values()).filter(m => m.userId === userId);
     const blocks = [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*📅 Scheduled Messages Management*\n\n${scheduledMessages.length > 0 ? `You have *${scheduledMessages.length}* scheduled message${scheduledMessages.length !== 1 ? 's' : ''}` : 'No scheduled messages yet'}${cat()}`
-        }
-      },
-      {
-        type: 'divider'
-      }
+      { type: 'section', text: { type: 'mrkdwn', text: `*Scheduled Messages* (${messages.length} total)` } },
+      { type: 'divider' }
     ];
 
-    if (scheduledMessages.length === 0) {
-      blocks.push(
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '🔄 *No scheduled messages yet*\n\nUse the button below to create your first scheduled message!'
-          }
-        },
-        {
-          type: 'actions',
-          elements: [{
-            type: 'button',
-            text: { type: 'plain_text', text: '✨ Create First Message', emoji: true },
-            style: 'primary',
-            action_id: 'create_first_message',
-            value: 'create_first'
-          }]
-        }
-      );
+    if (messages.length === 0) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `_No scheduled messages yet_${cat()}` } });
     } else {
-      scheduledMessages.forEach((msg, index) => {
-        const nextRun = msg.repeat === 'none' ? 
-          `${formatDateDisplay(msg.date)} at ${formatTimeDisplay(msg.time)}` : 
-          `${msg.repeat} at ${formatTimeDisplay(msg.time)}`;
-
+      messages.forEach(msg => {
+        const nextRun = msg.repeat && msg.repeat !== 'none' ? `${msg.repeat} at ${utils.formatTimeDisplay(msg.time)}` : `${msg.date} at ${utils.formatTimeDisplay(msg.time)}`;
         blocks.push({
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: `*${msg.title || (msg.type ? msg.type.replace('_', ' ') : 'Message')}*\n📅 ${nextRun}\n📍 <#${msg.channel}>`
+            text: `*${msg.title || msg.type}*\n📅 ${nextRun}\n📍 <#${msg.channel}>\n_${(msg.text || '').substring(0, 100)}${(msg.text || '').length > 100 ? '...' : ''}_`
           },
           accessory: {
             type: 'overflow',
-            action_id: `manage_message_${msg.id}`,
+            action_id: `msg_overflow_${msg.id}`, // we will match by exact action_ids
             options: [
-              { text: { type: 'plain_text', text: '✏️ Edit Message' }, value: `edit_${msg.id}` },
-              { text: { type: 'plain_text', text: '🗑️ Delete Message' }, value: `delete_${msg.id}` }
+              { text: { type: 'plain_text', text: 'Edit' }, value: `edit_msg_${msg.id}` },
+              { text: { type: 'plain_text', text: 'Delete' }, value: `delete_msg_${msg.id}` },
+              { text: { type: 'plain_text', text: 'Send Now' }, value: `send_msg_${msg.id}` }
             ]
           }
         });
       });
     }
 
-    blocks.push(
-      { type: 'divider' },
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: '🏠 Back to Menu', emoji: true },
-            action_id: 'back_to_main_menu',
-            value: 'back'
-          },
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: '➕ Create New Message', emoji: true },
-            style: 'primary',
-            action_id: 'create_new_message',
-            value: 'new'
-          }
-        ]
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: 'nav_menu' }
+      ]
+    });
+
+    return { type: 'modal', callback_id: 'scheduler_scheduled', title: { type: 'plain_text', text: 'Scheduled' }, close: { type: 'plain_text', text: 'Close' }, blocks };
+  }
+
+  // Simplified form builders for capacity, help, custom, poll
+  static form(page, data = {}) {
+    // data is the user's session object for this form
+    // page in ['capacity','poll','help','custom']
+    const title = `${page.charAt(0).toUpperCase() + page.slice(1)} Message`;
+    const blocks = [
+      { type: 'section', text: { type: 'mrkdwn', text: `*Step 1: Create Your ${page.charAt(0).toUpperCase() + page.slice(1)} Message*` } },
+      { type: 'divider' }
+    ];
+
+    const addTitleInput = (page !== 'capacity' && page !== 'help');
+
+    if (page === 'capacity') {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_Using default capacity check template. Feel free to customize the message text below._' } });
+    }
+    if (page === 'help') {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_Using default help button template. Feel free to customize the message text below._' } });
+    }
+
+    if (addTitleInput) {
+      blocks.push({
+        type: 'input',
+        block_id: 'title_block',
+        label: { type: 'plain_text', text: 'Title (optional)' },
+        element: {
+          type: 'plain_text_input',
+          action_id: 'title_input',
+          initial_value: data.title || '',
+          placeholder: { type: 'plain_text', text: 'Message title...' }
+        },
+        optional: true
+      });
+    }
+
+    blocks.push({
+      type: 'input',
+      block_id: 'text_block',
+      label: { type: 'plain_text', text: 'Message Text' },
+      element: {
+        type: 'plain_text_input',
+        action_id: 'text_input',
+        multiline: true,
+        initial_value: data.text || (page === 'capacity' ? (data.templates?.capacity || '') : (page === 'help' ? (data.templates?.help || '') : '')),
+        placeholder: { type: 'plain_text', text: 'Message content...' }
       }
-    );
+    });
+
+    // If poll, add poll config controls
+    if (page === 'poll') {
+      const radioOptions = [
+        { text: { type: 'plain_text', text: 'Single Choice' }, value: 'single' },
+        { text: { type: 'plain_text', text: 'Multiple Choice' }, value: 'multiple' },
+        { text: { type: 'plain_text', text: 'Open Discussion' }, value: 'open' }
+      ];
+      const selectedType = data.pollType || 'single';
+      const initialOption = radioOptions.find(r => r.value === selectedType) || radioOptions[0];
+
+      blocks.push({ type: 'divider' });
+      blocks.push({
+        type: 'section',
+        block_id: 'poll_type_section',
+        text: { type: 'mrkdwn', text: 'How should people vote?' },
+        accessory: {
+          type: 'radio_buttons',
+          action_id: 'poll_type_radio',
+          options: radioOptions,
+          initial_option: initialOption
+        }
+      });
+
+      if (selectedType !== 'open') {
+        blocks.push({ type: 'divider' });
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*Poll Options*' } });
+
+        const options = (data.pollOptions ? data.pollOptions.split('\n').filter(Boolean) : ['Option 1', 'Option 2']);
+        options.forEach((opt, idx) => {
+          blocks.push({
+            type: 'input',
+            block_id: `option_${idx}_block`,
+            label: { type: 'plain_text', text: `Option ${idx + 1}` },
+            element: {
+              type: 'plain_text_input',
+              action_id: `option_${idx}_input`,
+              initial_value: opt || '',
+              placeholder: { type: 'plain_text', text: `Enter option ${idx + 1}...` }
+            },
+            optional: idx >= 2
+          });
+        });
+
+        // Option management
+        const actionElements = [];
+        if (options.length < 10) actionElements.push({ type: 'button', text: { type: 'plain_text', text: 'Add Option' }, action_id: 'add_poll_option' });
+        if (options.length > 2) actionElements.push({ type: 'button', text: { type: 'plain_text', text: 'Remove Last Option' }, action_id: 'remove_poll_option', style: 'danger' });
+        if (actionElements.length > 0) blocks.push({ type: 'actions', elements: actionElements });
+
+        // Settings
+        blocks.push({ type: 'divider' });
+        blocks.push({
+          type: 'section',
+          block_id: 'poll_settings_section',
+          text: { type: 'mrkdwn', text: 'Display options:' },
+          accessory: {
+            type: 'checkboxes',
+            action_id: 'poll_settings_checkboxes',
+            options: [
+              { text: { type: 'plain_text', text: 'Show vote counts' }, value: 'show_counts' },
+              { text: { type: 'plain_text', text: 'Anonymous voting' }, value: 'anonymous' }
+            ],
+            initial_options: (data.pollSettings || []).map(s => ({ text: { type: 'plain_text', text: s }, value: s }))
+          }
+        });
+      } else {
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: "_Open discussion polls don't need predefined options. Responses happen in thread._" } });
+      }
+    }
+
+    // Action buttons
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: 'nav_menu' },
+        { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Preview Message' }, action_id: 'nav_preview' }
+      ]
+    });
 
     return {
       type: 'modal',
-      callback_id: 'message_manager',
-      title: { type: 'plain_text', text: 'Scheduled Messages', emoji: true },
-      close: { type: 'plain_text', text: 'Close', emoji: true },
+      callback_id: `scheduler_${page}`,
+      title: { type: 'plain_text', text: title },
+      submit: { type: 'plain_text', text: 'Preview Message' },
+      close: { type: 'plain_text', text: 'Cancel' },
       blocks
     };
   }
 
-  static generatePreviewBlocks(type, data = {}) {
-    switch (type) {
-      case 'daily_checkin':
-        return [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `📋 *Preview:*\n\n${data.text || templates.daily_checkin.text}`
-            }
-          },
-          {
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: '↓ These reactions will be automatically added ↓'
-            }]
-          },
-          {
-            type: 'section',
-            fields: [
-              { type: 'mrkdwn', text: '*🟢 Light schedule*\nReady for new work' },
-              { type: 'mrkdwn', text: '*🟡 Manageable*\nCurrently balanced' },
-              { type: 'mrkdwn', text: '*🟠 Schedule full*\nNo new work please' },
-              { type: 'mrkdwn', text: '*🔴 Overloaded*\nNeed help now' }
-            ]
-          }
-        ];
+  static preview(data = {}) {
+    // data: session data
+    const previewTextParts = [];
+    if (data.title) previewTextParts.push(`*${data.title}*`);
+    if (data.text) previewTextParts.push(data.text);
 
-      case 'help_button':
-        return [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `🆘 *Preview:*\n\n${data.text || templates.help_button.text}`
-            }
-          },
-          {
-            type: 'actions',
-            elements: [{
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                text: '🆘 Request Backup',
-                emoji: true
-              },
-              style: 'danger',
-              action_id: 'preview_help_button',
-              value: 'preview_only'
-            }]
-          },
-          {
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: `Alert will be sent to: ${data.alertChannels && data.alertChannels.length > 0 ? data.alertChannels.map(c => `<#${c}>`).join(', ') : '(selected channels)'}`
-            }]
-          }
-        ];
+    if (data.type === 'poll') {
+      if (data.pollOptions && data.pollType !== 'open') {
+        previewTextParts.push('\n' + data.pollOptions.split('\n').map((o, i) => `${i + 1}. ${o}`).join('\n'));
+      } else if (data.pollType === 'open') {
+        previewTextParts.push('\n_Open discussion - responses in thread_');
+      }
+    }
 
-      case 'poll':
-        const pollOptions = (data.pollOptions || 'Option 1\nOption 2\nOption 3').split('\n').filter(o => o.trim());
-        const previewBlocks = [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `📊 *Preview:*\n\n*${data.text || templates.poll}*`
-            }
-          },
-          {
-            type: 'divider'
-          }
-        ];
+    const previewBlock = {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Preview:*\n\`\`\`${previewTextParts.join('\n\n').substring(0, 500)}${previewTextParts.join('\n\n').length > 500 ? '...' : ''}\`\`\`${cat()}`
+      }
+    };
 
-        const emojis = ['🍕', '🌮', '🍣', '🥗', '🍔', '🍝', '🥪', '🌯', '🍜', '🥘'];
-
-        pollOptions.forEach((option, index) => {
-          const emoji = emojis[index % emojis.length];
-          previewBlocks.push({
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: `${emoji} *${option.trim()}*`
-            },
-            accessory: {
-              type: 'button',
-              text: {
-                type: 'plain_text',
-                emoji: true,
-                text: 'Vote'
-              },
-              value: `vote_${index}`,
-              action_id: 'preview_vote'
-            }
-          });
-        });
-
-        return previewBlocks;
-
-      case 'custom':
-      default:
-        if (data.richText && data.richText.elements) {
-          return [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: '💬 *Preview:*'
-              }
-            },
-            {
-              type: 'rich_text',
-              elements: data.richText.elements
-            }
-          ];
-        } else {
-          return [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `💬 *Preview:*\n\n${data.text || 'Your custom message content will appear here'}`
-              }
-            }
-          ];
+    return {
+      type: 'modal',
+      callback_id: 'scheduler_preview',
+      title: { type: 'plain_text', text: `${(data.type || 'Message').charAt(0).toUpperCase() + (data.type || 'Message').slice(1)} Preview` },
+      close: { type: 'plain_text', text: 'Cancel' },
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: '*Step 2: Preview Your Message*' } },
+        previewBlock,
+        { type: 'divider' },
+        {
+          type: 'actions',
+          elements: [
+            { type: 'button', text: { type: 'plain_text', text: '← Back to Edit' }, action_id: `nav_${data.type || 'custom'}` },
+            { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Continue to Send/Schedule' }, action_id: 'nav_schedule' }
+          ]
         }
+      ]
+    };
+  }
+
+  static schedule(data = {}) {
+    const blocks = [
+      { type: 'section', text: { type: 'mrkdwn', text: '*Step 3: Send or Schedule Message*' } },
+      { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: '*Where to send:*' } },
+      {
+        type: 'input',
+        block_id: 'channel_block',
+        label: { type: 'plain_text', text: 'Target Channel' },
+        element: {
+          type: 'conversations_select',
+          action_id: 'channel_select',
+          ...(data.channel ? { initial_conversation: data.channel } : {}),
+          placeholder: { type: 'plain_text', text: 'Select channel to post message' }
+        }
+      }
+    ];
+
+    if (data.type === 'help') {
+      blocks.push({
+        type: 'input',
+        block_id: 'alert_channels_block',
+        label: { type: 'plain_text', text: 'Alert Channels' },
+        element: {
+          type: 'multi_conversations_select',
+          action_id: 'alert_channels_select',
+          ...(data.alertChannels ? { initial_conversations: data.alertChannels } : {}),
+          placeholder: { type: 'plain_text', text: 'Channels to notify when help is requested' }
+        },
+        hint: { type: 'plain_text', text: 'Select channels that will be alerted when someone clicks the help button' }
+      });
+    }
+
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*When to send this message:*' } });
+    blocks.push({
+      type: 'actions',
+      block_id: 'send_timing_block',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '🐈‍⬛ Post Now' },
+          style: data.scheduleType === 'now' ? 'primary' : undefined,
+          action_id: 'timing_now'
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '🧶 Schedule for Later' },
+          style: data.scheduleType === 'schedule' || !data.scheduleType ? 'primary' : undefined,
+          action_id: 'timing_schedule'
+        }
+      ]
+    });
+
+    if (data.scheduleType === 'schedule' || !data.scheduleType) {
+      blocks.push({ type: 'divider' });
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*Schedule Details:*' } });
+      blocks.push({
+        type: 'actions',
+        block_id: 'datetime_block',
+        elements: [
+          {
+            type: 'datepicker',
+            action_id: 'date_picker',
+            initial_date: data.date || utils.todayInEST()
+          },
+          {
+            type: 'timepicker',
+            action_id: 'time_picker',
+            initial_time: data.time || '09:00'
+          }
+        ]
+      });
+      blocks.push({
+        type: 'input',
+        block_id: 'repeat_block',
+        label: { type: 'plain_text', text: 'Repeat Schedule' },
+        element: {
+          type: 'static_select',
+          action_id: 'repeat_select',
+          initial_option: data.repeat === 'daily' ? { text: { type: 'plain_text', text: 'Daily' }, value: 'daily' } :
+            data.repeat === 'weekly' ? { text: { type: 'plain_text', text: 'Weekly' }, value: 'weekly' } :
+              data.repeat === 'monthly' ? { text: { type: 'plain_text', text: 'Monthly' }, value: 'monthly' } :
+                { text: { type: 'plain_text', text: 'None (One-time)' }, value: 'none' },
+          options: [
+            { text: { type: 'plain_text', text: 'None (One-time)' }, value: 'none' },
+            { text: { type: 'plain_text', text: 'Daily' }, value: 'daily' },
+            { text: { type: 'plain_text', text: 'Weekly' }, value: 'weekly' },
+            { text: { type: 'plain_text', text: 'Monthly' }, value: 'monthly' }
+          ]
+        }
+      });
+    }
+
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: '← Back to Preview' }, action_id: 'nav_preview' },
+        { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Post' }, action_id: 'submit_message' }
+      ]
+    });
+
+    return {
+      type: 'modal',
+      callback_id: 'scheduler_schedule',
+      title: { type: 'plain_text', text: 'Send or Schedule Message' },
+      submit: { type: 'plain_text', text: 'Post' },
+      close: { type: 'plain_text', text: 'Cancel' },
+      blocks
+    };
+  }
+}
+
+// ============================================
+// Common handlers (Slash command entrypoint)
+// ============================================
+
+app.command('/pm', async ({ ack, body, client, logger }) => {
+  await ack();
+  try {
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: ViewBuilder.menu()
+    });
+    logger.info(`Opened menu for ${body.user_id}`);
+  } catch (e) {
+    console.error('Failed to open menu', e);
+  }
+});
+
+// ============================================
+// Navigation handlers (use views.update only)
+// - nav_menu, nav_scheduled, nav_preview, nav_schedule
+// - form-type handlers: nav_capacity, nav_poll, nav_help, nav_custom
+// ============================================
+
+['nav_menu', 'nav_scheduled', 'nav_preview', 'nav_schedule'].forEach(actionId => {
+  app.action(actionId, async ({ ack, body, client }) => {
+    await ack();
+    const page = actionId.replace('nav_', '');
+    const userId = body.user.id;
+
+    try {
+      let session = dataStore.userSessions.get(userId) || {};
+      // For preview/schedule we need to extract current view state
+      if ((page === 'preview' || page === 'schedule') && body.view?.state?.values) {
+        const values = body.view.state.values;
+
+        // Title (if present)
+        if (values.title_block?.title_input) {
+          session.title = getFormValue(values, 'title_block', 'title_input') || session.title;
+        }
+
+        // Text (always)
+        session.text = getFormValue(values, 'text_block', 'text_input') || session.text;
+
+        // Poll-specific extraction
+        if (session.type === 'poll') {
+          // poll type radio
+          const pollType = values?.poll_type_section?.poll_type_radio?.selected_option?.value;
+          session.pollType = pollType || session.pollType || 'single';
+
+          // poll options
+          if (session.pollType !== 'open') {
+            const opts = [];
+            let idx = 0;
+            while (values[`option_${idx}_block`]) {
+              const v = getFormValue(values, `option_${idx}_block`, `option_${idx}_input`);
+              if (v) opts.push(v);
+              idx++;
+            }
+            if (opts.length > 0) session.pollOptions = opts.join('\n');
+          }
+
+          // settings checkboxes
+          const pollSettingsSel = values?.poll_settings_section?.poll_settings_checkboxes?.selected_options || [];
+          session.pollSettings = pollSettingsSel.map(s => s.value);
+        }
+
+        // channel & scheduling extraction
+        session.channel = getFormValue(values, 'channel_block', 'channel_select', 'conversation') || session.channel;
+        const dateVal = getFormValue(values, 'datetime_block', 'date_picker', 'date');
+        const timeVal = getFormValue(values, 'datetime_block', 'time_picker', 'time');
+        const repeatVal = getFormValue(values, 'repeat_block', 'repeat_select', 'selected');
+
+        if (dateVal) session.date = dateVal;
+        if (timeVal) session.time = timeVal;
+        if (repeatVal) session.repeat = repeatVal;
+
+        // alertChannels for help
+        if (session.type === 'help') {
+          const alertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
+          if (alertChannels) session.alertChannels = alertChannels;
+        }
+
+        dataStore.userSessions.set(userId, session);
+      }
+
+      // Build the appropriate view
+      let nextView;
+      if (page === 'menu') {
+        nextView = ViewBuilder.menu();
+      } else if (page === 'scheduled') {
+        nextView = ViewBuilder.scheduledList(userId);
+      } else if (page === 'preview') {
+        nextView = ViewBuilder.preview(session);
+      } else if (page === 'schedule') {
+        nextView = ViewBuilder.schedule(session);
+      } else {
+        nextView = ViewBuilder.menu();
+      }
+
+      await client.views.update({
+        view_id: body.view.id,
+        view: nextView
+      });
+    } catch (e) {
+      console.error(`Navigation ${actionId} error:`, e);
+    }
+  });
+});
+
+['nav_capacity', 'nav_poll', 'nav_help', 'nav_custom'].forEach(actionId => {
+  app.action(actionId, async ({ ack, body, client }) => {
+    await ack();
+    const userId = body.user.id;
+    const messageType = actionId.replace('nav_', '');
+
+    try {
+      let session = dataStore.userSessions.get(userId) || {};
+      // If switching type, reset relevant fields
+      if (!session.type || session.type !== messageType) {
+        if (messageType === 'capacity') {
+          session = { type: 'capacity', title: '', text: '', scheduleType: 'schedule' };
+        } else if (messageType === 'help') {
+          session = { type: 'help', title: '', text: '', alertChannels: [], scheduleType: 'schedule' };
+        } else if (messageType === 'poll') {
+          session = { type: 'poll', title: '', text: '', pollType: 'single', pollOptions: 'Option 1\nOption 2', pollSettings: [], scheduleType: 'schedule' };
+        } else {
+          session = { type: 'custom', title: '', text: '', scheduleType: 'schedule' };
+        }
+      } else {
+        // returning to existing message type; ensure defaults exist
+        session.type = messageType;
+      }
+
+      dataStore.userSessions.set(userId, session);
+
+      await client.views.update({
+        view_id: body.view.id,
+        view: ViewBuilder.form(messageType, session)
+      });
+    } catch (e) {
+      console.error(`${actionId} handler error`, e);
+    }
+  });
+});
+
+// ============================================
+// Poll form interactive handlers (add/remove option, poll type, settings)
+// ============================================
+
+app.action('poll_type_radio', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const selectedType = body.actions[0].selected_option.value;
+    const session = dataStore.userSessions.get(userId) || {};
+    session.pollType = selectedType;
+    if (selectedType === 'open') session.pollOptions = ''; // clear options
+    dataStore.userSessions.set(userId, session);
+    await client.views.update({ view_id: body.view.id, view: ViewBuilder.form('poll', session) });
+  } catch (e) {
+    console.error('poll_type_radio error', e);
+  }
+});
+
+app.action('add_poll_option', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const session = dataStore.userSessions.get(userId) || {};
+    // extract existing options from view
+    const values = body.view.state.values;
+    const opts = [];
+    let idx = 0;
+    while (values[`option_${idx}_block`]) {
+      const v = getFormValue(values, `option_${idx}_block`, `option_${idx}_input`);
+      if (v) opts.push(v);
+      idx++;
+    }
+    opts.push(`Option ${opts.length + 1}`);
+    session.pollOptions = opts.join('\n');
+    dataStore.userSessions.set(userId, session);
+    await client.views.update({ view_id: body.view.id, view: ViewBuilder.form('poll', session) });
+  } catch (e) {
+    console.error('add_poll_option error', e);
+  }
+});
+
+app.action('remove_poll_option', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const session = dataStore.userSessions.get(userId) || {};
+    const values = body.view.state.values;
+    const opts = [];
+    let idx = 0;
+    while (values[`option_${idx}_block`]) {
+      const v = getFormValue(values, `option_${idx}_block`, `option_${idx}_input`);
+      if (v) opts.push(v);
+      idx++;
+    }
+    if (opts.length > 2) opts.pop();
+    session.pollOptions = opts.join('\n');
+    dataStore.userSessions.set(userId, session);
+    await client.views.update({ view_id: body.view.id, view: ViewBuilder.form('poll', session) });
+  } catch (e) {
+    console.error('remove_poll_option error', e);
+  }
+});
+
+app.action('poll_settings_checkboxes', async ({ ack, body }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const session = dataStore.userSessions.get(userId) || {};
+    const selected = body.actions[0].selected_options || [];
+    session.pollSettings = selected.map(s => s.value);
+    dataStore.userSessions.set(userId, session);
+  } catch (e) {
+    console.error('poll_settings_checkboxes error', e);
+  }
+});
+
+// ============================================
+// Schedule page specific handlers: timing buttons, channel select
+// ============================================
+
+app.action('timing_now', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const session = dataStore.userSessions.get(userId) || {};
+    session.scheduleType = 'now';
+    dataStore.userSessions.set(userId, session);
+    await client.views.update({ view_id: body.view.id, view: ViewBuilder.schedule(session) });
+  } catch (e) {
+    console.error('timing_now error', e);
+  }
+});
+
+app.action('timing_schedule', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const session = dataStore.userSessions.get(userId) || {};
+    session.scheduleType = 'schedule';
+    dataStore.userSessions.set(userId, session);
+    await client.views.update({ view_id: body.view.id, view: ViewBuilder.schedule(session) });
+  } catch (e) {
+    console.error('timing_schedule error', e);
+  }
+});
+
+app.action('channel_select', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const selectedChannel = body.actions[0].selected_conversation;
+    const session = dataStore.userSessions.get(userId) || {};
+    session.channel = selectedChannel;
+    dataStore.userSessions.set(userId, session);
+    // Optionally verify channel access
+    try {
+      const info = await client.conversations.info({ channel: selectedChannel });
+      console.log('channel_select verified', info.channel.id);
+    } catch (err) {
+      console.warn('channel_select verification failed', err?.data?.error);
+    }
+  } catch (e) {
+    console.error('channel_select error', e);
+  }
+});
+
+// ============================================
+// Submit/Posting handlers
+// - submit_message: posts or schedules messages (centralized)
+// - submit_poll: creates and posts poll (centralized)
+// ============================================
+
+async function scheduleJobForMessage(msg, client) {
+  // Cancel existing
+  try {
+    if (dataStore.activeJobs.has(msg.id)) {
+      const j = dataStore.activeJobs.get(msg.id);
+      j.cancel?.();
+      dataStore.activeJobs.delete(msg.id);
+    }
+  } catch (e) { /* ignore */ }
+
+  // Recurring with cron OR one-off with node-schedule
+  if (msg.repeat && msg.repeat !== 'none') {
+    // cron expression
+    const [hh, mm] = (msg.time || '09:00').split(':').map(Number);
+    let cronExpr;
+    if (msg.repeat === 'daily') cronExpr = `${mm} ${hh} * * *`;
+    else if (msg.repeat === 'weekly') {
+      const day = new Date(msg.date).getDay();
+      cronExpr = `${mm} ${hh} * * ${day}`;
+    } else if (msg.repeat === 'monthly') {
+      const day = msg.date.split('-')[2];
+      cronExpr = `${mm} ${hh} ${day} * *`;
+    }
+
+    if (cronExpr) {
+      const job = cron.schedule(cronExpr, async () => {
+        await sendMessageToChannel(msg, client);
+      }, { timezone: 'America/New_York' });
+      dataStore.activeJobs.set(msg.id, job);
+      console.log('scheduled recurring job', cronExpr, msg.id);
+    }
+  } else {
+    // one-time
+    const dateParts = (msg.date || utils.todayInEST()).split('-').map(Number); // YYYY-MM-DD
+    const [y, mon, d] = dateParts;
+    const [hh, mm] = (msg.time || '09:00').split(':').map(Number);
+    const when = new Date(y, mon - 1, d, hh, mm, 0);
+    if (when > new Date()) {
+      const job = schedule.scheduleJob(when, async () => {
+        await sendMessageToChannel(msg, client);
+        // clean up
+        if (msg.repeat === 'none') {
+          dataStore.scheduledMessages.delete(msg.id);
+          saveScheduledMessages();
+        }
+      });
+      dataStore.activeJobs.set(msg.id, job);
+      console.log('scheduled one-time job', when.toISOString(), msg.id);
+    } else {
+      console.log('one-time schedule time in past; skipping job scheduling', msg.id);
     }
   }
 }
 
-// ================================
-// SLASH COMMAND HANDLER
-// ================================
-app.command('/cat', async ({ command, ack, client }) => {
-  await ack();
-
+async function sendMessageToChannel(msg, client) {
   try {
-    console.log(`🐱 /cat command received from user ${command.user_id}`);
-
-    const modal = ModalBuilder.createMainMenu(command.user_id);
-    await client.views.open({
-      trigger_id: command.trigger_id,
-      view: modal
-    });
-
-    console.log('✅ Main menu modal opened successfully');
-  } catch (error) {
-    console.error('❌ Error opening modal:', error);
-  }
-});
-
-// ================================
-// INTERACTIVE COMPONENT HANDLERS
-// ================================
-
-// Main menu - message type selection handlers
-const handleMessageTypeSelection = async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const messageType = body.actions[0].value;
-    console.log(`📝 User selected message type: ${messageType}`);
-
-    const modal = ModalBuilder.createSetupModal(messageType);
-    sessionData.set(body.user.id, { type: messageType, data: {} });
-
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log(`✅ Setup modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error updating modal:', error);
-  }
-};
-
-app.action('select_daily_checkin', handleMessageTypeSelection);
-app.action('select_help_button', handleMessageTypeSelection);
-app.action('select_poll', handleMessageTypeSelection);
-app.action('select_custom', handleMessageTypeSelection);
-
-// Back to main menu
-app.action('back_to_main_menu', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log('✅ Returned to main menu');
-  } catch (error) {
-    console.error('❌ Error returning to main menu:', error);
-  }
-});
-
-// Back to preview from scheduler or send now
-app.action('back_to_preview', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const messageType = body.actions[0].value;
-    const sessionInfo = sessionData.get(body.user.id) || {};
-
-    const modal = ModalBuilder.createPreviewModal(messageType, sessionInfo.data || {});
-
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log(`✅ Returned to preview for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error returning to preview:', error);
-  }
-});
-
-// Create new/first message handlers
-app.action('create_new_message', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log('✅ Returned to main menu to create new message');
-  } catch (error) {
-    console.error('❌ Error returning to main menu:', error);
-  }
-});
-
-app.action('create_first_message', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const modal = ModalBuilder.createMainMenu(body.user.id);
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log('✅ Returned to main menu to create first message');
-  } catch (error) {
-    console.error('❌ Error returning to main menu:', error);
-  }
-});
-
-// Back to setup from preview
-app.action('back_to_setup', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const messageType = body.actions[0].value;
-    const sessionInfo = sessionData.get(body.user.id) || {};
-
-    const modal = ModalBuilder.createSetupModal(messageType, sessionInfo.data || {});
-
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log(`✅ Returned to setup for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error returning to setup:', error);
-  }
-});
-
-// Preview to scheduler navigation
-app.action('go_to_scheduler', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const messageType = body.actions[0].value;
-    const sessionInfo = sessionData.get(body.user.id) || {};
-
-    const modal = ModalBuilder.createSchedulerModal(messageType, sessionInfo.data || {});
-
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log(`✅ Scheduler modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error going to scheduler:', error);
-  }
-});
-
-// Send now action
-app.action('send_now', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const messageType = body.actions[0].value;
-    const sessionInfo = sessionData.get(body.user.id) || {};
-
-    const modal = ModalBuilder.createSendNowModal(messageType, sessionInfo.data || {});
-
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log(`✅ Send Now modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error opening send now modal:', error);
-  }
-});
-
-// Manage scheduled messages
-app.action('manage_scheduled_messages', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const modal = ModalBuilder.createMessageManagerModal(scheduledMessages);
-    await client.views.update({
-      view_id: body.view.id,
-      view: modal
-    });
-
-    console.log('📅 Message management opened');
-  } catch (error) {
-    console.error('❌ Error accessing message management:', error);
-  }
-});
-
-// Message management overflow actions
-app.action(/^manage_message_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-
-  try {
-    const selectedOption = action.selected_option;
-    if (!selectedOption || !selectedOption.value) {
-      console.log('❌ No selected option found in overflow action');
-      return;
-    }
-
-    const [actionType, msgId] = selectedOption.value.split('_', 2);
-    console.log(`🔧 Managing message: ${actionType} for ${msgId}`);
-
-    if (actionType === 'delete') {
-      const messageIndex = scheduledMessages.findIndex(msg => msg.id === msgId);
-      if (messageIndex >= 0) {
-        const deletedMsg = scheduledMessages.splice(messageIndex, 1)[0];
-
-        if (jobs.has(msgId)) {
-          jobs.get(msgId).destroy();
-          jobs.delete(msgId);
-        }
-
-        saveMessages();
-        console.log(`🗑️ Deleted message: ${msgId}`);
-
-        const modal = ModalBuilder.createMessageManagerModal(scheduledMessages);
-        await client.views.update({
-          view_id: body.view.id,
-          view: modal
-        });
-
-        await client.chat.postEphemeral({
-          channel: body.user.id,
-          user: body.user.id,
-          text: `✅ Message deleted successfully! 🗑️${cat()}`
-        });
+    if (!msg.channel) throw new Error('No channel specified');
+    if (msg.type === 'capacity' || msg.type === 'custom' || msg.type === 'help') {
+      const text = (msg.title ? `*${msg.title}*\n` : '') + (msg.text || '') + cat();
+      const res = await client.chat.postMessage({ channel: msg.channel, text });
+      console.log('posted message', res.ts);
+      if (msg.type === 'capacity' && res.ok && res.ts) {
+        try {
+          await client.reactions.add({ channel: msg.channel, timestamp: res.ts, name: 'black_cat' });
+        } catch (e) { /* ignore reaction errors */ }
       }
-    } else if (actionType === 'edit') {
-      await client.chat.postEphemeral({
-        channel: body.user.id,
-        user: body.user.id,
-        text: `✏️ Edit functionality coming soon! For now, you can delete and recreate the message.${cat()}`
-      });
+      return res.ok;
+    } else if (msg.type === 'poll') {
+      // Build poll blocks
+      let blocks = [{ type: 'section', text: { type: 'mrkdwn', text: `*${msg.title || 'Poll'}*${cat()}\n${msg.text || ''}` } }];
+      if (msg.pollType !== 'open') {
+        const options = (msg.pollOptions || '').split('\n').filter(Boolean);
+        const buttonEls = options.map((opt, idx) => ({
+          type: 'button',
+          text: { type: 'plain_text', text: opt.slice(0, 75) },
+          action_id: `poll_vote_${msg.id}_${idx}`,
+          value: `${idx}`
+        }));
+        for (let i = 0; i < buttonEls.length; i += 5) {
+          blocks.push({ type: 'actions', block_id: `poll_${msg.id}_${i}`, elements: buttonEls.slice(i, i + 5) });
+        }
+      } else {
+        blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_Open discussion - respond in thread_' }] });
+      }
+      const res = await client.chat.postMessage({ channel: msg.channel, text: msg.title || 'Poll', blocks });
+      // store messageTs if needed for vote updates
+      if (res.ok && res.ts) {
+        // Persist poll messageTs if we created a poll object earlier
+        if (dataStore.polls.has(msg.id)) {
+          const p = dataStore.polls.get(msg.id);
+          p.messageTs = res.ts;
+          p.channel = msg.channel;
+          dataStore.polls.set(msg.id, p);
+        }
+      }
+      return res.ok;
     }
-  } catch (error) {
-    console.error('❌ Error managing message:', error);
-
-    await client.chat.postEphemeral({
-      channel: body.user.id,
-      user: body.user.id,
-      text: '❌ Error managing message. Please try again.'
-    });
+  } catch (e) {
+    console.error('sendMessageToChannel error', e);
+    return false;
   }
-});
+}
 
-// Preview button handlers (non-functional)
-app.action('preview_help_button', async ({ ack }) => {
-  await ack();
-  console.log('👆 Preview help button clicked (non-functional)');
-});
+async function handleSubmitMessage(body, client) {
+  const userId = body.user.id;
+  const session = dataStore.userSessions.get(userId) || {};
+  const values = body.view?.state?.values || {};
 
-app.action('preview_vote', async ({ ack }) => {
-  await ack();
-  console.log('👆 Preview vote button clicked (non-functional)');
-});
+  // extract state (similar logic used earlier)
+  if (values.title_block?.title_input) session.title = getFormValue(values, 'title_block', 'title_input') || session.title;
+  session.text = getFormValue(values, 'text_block', 'text_input') || session.text;
+  session.channel = getFormValue(values, 'channel_block', 'channel_select', 'conversation') || session.channel;
+  const dateVal = getFormValue(values, 'datetime_block', 'date_picker', 'date');
+  const timeVal = getFormValue(values, 'datetime_block', 'time_picker', 'time');
+  const repeatVal = getFormValue(values, 'repeat_block', 'repeat_select', 'selected');
+  if (dateVal) session.date = dateVal;
+  if (timeVal) session.time = timeVal;
+  if (repeatVal) session.repeat = repeatVal;
+  if (session.type === 'help') {
+    const alertCh = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
+    if (alertCh) session.alertChannels = alertCh;
+  }
 
-// ================================
-// MODAL SUBMISSION HANDLERS
-// ================================
+  // default values
+  session.scheduleType = session.scheduleType || 'schedule';
+  session.repeat = session.repeat || 'none';
+  session.time = session.time || '09:00';
+  session.date = session.date || utils.todayInEST();
 
-// Setup modal submissions - FIXED: Use views.update instead of views.push
-app.view(/^(daily_checkin|help_button|custom)_setup$/, async ({ ack, body, client }) => {
-  await ack();
+  // Validation
+  if (!session.channel) {
+    await client.chat.postEphemeral({ channel: body.user.id, user: userId, text: `Please select a channel first.${cat()}` });
+    return;
+  }
+  if (session.scheduleType === 'schedule' && session.repeat === 'none' && utils.isDateTimeInPast(session.date, session.time)) {
+    await client.chat.postEphemeral({ channel: body.user.id, user: userId, text: `Cannot schedule messages in the past.${cat()}` });
+    return;
+  }
+  if (session.type === 'help' && (!session.alertChannels || session.alertChannels.length === 0)) {
+    await client.chat.postEphemeral({ channel: body.user.id, user: userId, text: `Please select at least one alert channel for help notifications.${cat()}` });
+    return;
+  }
 
-  try {
-    const messageType = body.view.callback_id.replace('_setup', '');
-    const formData = extractFormData(body.view);
+  // create message object
+  if (!session.id) session.id = utils.generateId('msg_');
+  const messageObj = {
+    id: session.id,
+    userId,
+    type: session.type || 'custom',
+    title: session.title || '',
+    text: session.text || '',
+    channel: session.channel,
+    scheduleType: session.scheduleType,
+    date: session.date,
+    time: session.time,
+    repeat: session.repeat,
+    alertChannels: session.alertChannels || []
+  };
 
-    console.log(`👀 Going to preview for ${messageType}:`, formData);
-
-    // Store data for later use
-    sessionData.set(body.user.id, { type: messageType, data: formData });
-
-    const modal = ModalBuilder.createPreviewModal(messageType, formData);
-
-    // FIXED: Use views.update instead of views.push for modal submissions
+  if (session.scheduleType === 'now') {
+    // post immediately
+    const success = await sendMessageToChannel(messageObj, client);
     await client.views.update({
       view_id: body.view.id,
-      view: modal
+      view: {
+        type: 'modal',
+        title: { type: 'plain_text', text: success ? 'Message Posted!' : 'Post Failed' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: success ? `${messageObj.type} message posted to <#${messageObj.channel}>!${cat()}` : `Failed to post to <#${messageObj.channel}>. Make sure I'm invited.` } }]
+      }
     });
-
-    console.log(`✅ Preview modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error updating to preview:', error);
-  }
-});
-
-// Poll setup modal submission - FIXED
-app.view('poll_setup', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const messageType = 'poll';
-    const formData = extractFormData(body.view);
-
-    console.log(`👀 Going to preview for ${messageType}:`, formData);
-
-    // Store data for later use
-    sessionData.set(body.user.id, { type: messageType, data: formData });
-
-    const modal = ModalBuilder.createPreviewModal(messageType, formData);
-
-    // FIXED: Use views.update instead of views.push
+  } else {
+    // schedule for later: persist and schedule
+    dataStore.scheduledMessages.set(messageObj.id, messageObj);
+    saveScheduledMessages();
+    await scheduleJobForMessage(messageObj, client);
     await client.views.update({
       view_id: body.view.id,
-      view: modal
+      view: {
+        type: 'modal',
+        title: { type: 'plain_text', text: 'Message Scheduled!' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${messageObj.type} message scheduled for <#${messageObj.channel}>!${cat()}\n\n${messageObj.date} at ${utils.formatTimeDisplay(messageObj.time)}\nRepeat: ${messageObj.repeat !== 'none' ? messageObj.repeat : 'One-time'}` } }]
+      }
     });
+  }
 
-    console.log(`✅ Preview modal opened for ${messageType}`);
-  } catch (error) {
-    console.error('❌ Error updating to preview:', error);
+  // clear session
+  dataStore.userSessions.delete(userId);
+}
+
+async function handleSubmitPoll(body, client) {
+  const userId = body.user.id;
+  const session = dataStore.userSessions.get(userId) || {};
+  const values = body.view?.state?.values || {};
+
+  // extract poll details
+  session.title = getFormValue(values, 'title_block', 'title_input') || session.title;
+  session.text = getFormValue(values, 'text_block', 'text_input') || session.text;
+  session.pollType = values?.poll_type_section?.poll_type_radio?.selected_option?.value || session.pollType || 'single';
+  // options
+  if (session.pollType !== 'open') {
+    const opts = [];
+    let idx = 0;
+    while (values[`option_${idx}_block`]) {
+      const v = getFormValue(values, `option_${idx}_block`, `option_${idx}_input`);
+      if (v) opts.push(v);
+      idx++;
+    }
+    if (opts.length > 0) session.pollOptions = opts.join('\n');
+  }
+  // settings
+  session.pollSettings = (values?.poll_settings_section?.poll_settings_checkboxes?.selected_options || []).map(o => o.value);
+
+  // channel/schedule extraction (if present)
+  session.channel = getFormValue(values, 'channel_block', 'channel_select', 'conversation') || session.channel;
+  const dateVal = getFormValue(values, 'datetime_block', 'date_picker', 'date');
+  const timeVal = getFormValue(values, 'datetime_block', 'time_picker', 'time');
+  const repeatVal = getFormValue(values, 'repeat_block', 'repeat_select', 'selected');
+  if (dateVal) session.date = dateVal;
+  if (timeVal) session.time = timeVal;
+  if (repeatVal) session.repeat = repeatVal;
+  session.scheduleType = session.scheduleType || 'schedule';
+  session.repeat = session.repeat || 'none';
+  session.time = session.time || '09:00';
+  session.date = session.date || utils.todayInEST();
+
+  // validation
+  if (!session.channel) {
+    await client.chat.postEphemeral({ channel: body.user.id, user: userId, text: `Please select a channel first.${cat()}` });
+    return;
+  }
+  if (session.pollType !== 'open') {
+    const optCount = (session.pollOptions || '').split('\n').filter(Boolean).length;
+    if (optCount < 2) {
+      await client.chat.postEphemeral({ channel: body.user.id, user: userId, text: `Please provide at least 2 poll options.${cat()}` });
+      return;
+    }
+  }
+
+  // Create poll object and persist
+  if (!session.id) session.id = utils.generateId('poll_');
+  const pollObj = {
+    id: session.id,
+    creator: userId,
+    channel: session.channel,
+    title: session.title,
+    text: session.text,
+    pollType: session.pollType,
+    pollOptions: session.pollOptions || '',
+    pollSettings: session.pollSettings || [],
+    created: new Date().toISOString(),
+    votes: {}, // userId -> [optionIndices]
+    status: 'active',
+    messageTs: null
+  };
+  dataStore.polls.set(pollObj.id, pollObj);
+
+  // post poll (similar to sendMessageToChannel but keep poll object updated)
+  const options = (pollObj.pollOptions || '').split('\n').filter(Boolean);
+  const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: `*${pollObj.title || 'Poll'}*${cat()}\n${pollObj.text || ''}` } }];
+  if (pollObj.pollType !== 'open') {
+    const buttonEls = options.map((opt, idx) => ({
+      type: 'button',
+      text: { type: 'plain_text', text: opt.slice(0, 75) },
+      action_id: `poll_vote_${pollObj.id}_${idx}`,
+      value: `${idx}`
+    }));
+    for (let i = 0; i < buttonEls.length; i += 5) {
+      blocks.push({ type: 'actions', block_id: `poll_${pollObj.id}_${i}`, elements: buttonEls.slice(i, i + 5) });
+    }
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: pollObj.pollType === 'single' ? '_Click to vote. Click again to unvote._' : '_Click to vote (multiple). Click again to unvote._' }] });
+  } else {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: '_Open discussion - respond in thread._' }] });
+  }
+
+  try {
+    const res = await client.chat.postMessage({ channel: pollObj.channel, text: pollObj.title || 'Poll', blocks });
+    if (res.ok && res.ts) {
+      pollObj.messageTs = res.ts;
+      dataStore.polls.set(pollObj.id, pollObj);
+    }
+    await client.views.update({
+      view_id: body.view.id,
+      view: {
+        type: 'modal',
+        title: { type: 'plain_text', text: 'Poll Posted!' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `Poll posted to <#${pollObj.channel}>!${cat()}` } }]
+      }
+    });
+  } catch (e) {
+    console.error('handleSubmitPoll error', e);
+    await client.views.update({
+      view_id: body.view.id,
+      view: {
+        type: 'modal',
+        title: { type: 'plain_text', text: 'Poll Failed' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `Failed to post poll. ${e.message}` } }]
+      }
+    });
+  }
+
+  // clear session
+  dataStore.userSessions.delete(userId);
+}
+
+// Wire up submit actions: schedule page top-level submit and action button both call handleSubmitMessage
+app.view(/^scheduler_/, async ({ ack, body, view, client }) => {
+  // ack to avoid timeouts; we'll process quickly
+  await ack();
+
+  const callback = body.view.callback_id;
+  try {
+    if (callback === 'scheduler_schedule') {
+      // schedule page submit
+      await handleSubmitMessage(body, client);
+    } else if (callback === 'scheduler_poll') {
+      // shouldn't happen - polls use submit via nav flow - but guard
+      await handleSubmitPoll(body, client);
+    } else {
+      // other modals may just be preview; no-op
+      // (we keep view submissions simple; most navigation uses action buttons)
+    }
+  } catch (e) {
+    console.error('view submission error', e);
   }
 });
 
-// Send Now confirmation handler
-app.view('send_now_confirm', async ({ ack, body, client }) => {
+// action button on schedule page
+app.action('submit_message', async ({ ack, body, client }) => {
   await ack();
-
   try {
-    const userId = body.user.id;
-    const formData = extractFormData(body.view);
-    const sessionInfo = sessionData.get(userId) || {};
-
-    if (!sessionInfo.data || !sessionInfo.type) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Error: Session data not found. Please try creating the message again.'
-      });
-      return;
-    }
-
-    const targetChannel = formData.sendChannel;
-    if (!targetChannel) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Please select a channel to send your message to.'
-      });
-      return;
-    }
-
-    // Create message object for sending
-    const messageData = {
-      ...sessionInfo.data,
-      type: sessionInfo.type,
-      channel: targetChannel,
-      id: generateId()
-    };
-
-    // Send the message
-    const success = await sendMessage(messageData);
-
-    if (success) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: `✅ Your ${sessionInfo.type.replace('_', ' ')} message has been sent successfully to <#${targetChannel}>! 🚀${cat()}`
-      });
-    } else {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Failed to send message. Please try again.'
-      });
-    }
-
-    // Clear session data
-    sessionData.delete(userId);
-
-    console.log(`✅ Message sent immediately: ${sessionInfo.type} to ${targetChannel}`);
-  } catch (error) {
-    console.error('❌ Error sending message immediately:', error);
-
-    await client.chat.postEphemeral({
-      channel: body.user.id,
-      user: body.user.id,
-      text: '❌ Failed to send message. Please try again.'
-    });
-  }
-});
-
-// Scheduler modal submission
-app.view('message_scheduler', async ({ ack, body, client }) => {
-  await ack();
-
-  try {
-    const userId = body.user.id;
-    const formData = extractFormData(body.view);
-    const sessionInfo = sessionData.get(userId) || {};
-
-    // Combine session data with form data
-    const messageData = { ...sessionInfo.data, ...formData };
-    messageData.type = sessionInfo.type;
-    messageData.id = generateId();
-    messageData.date = formData.scheduleDate || todayInEST();
-    messageData.time = formData.scheduleTime || currentTimeInEST();
-    messageData.repeat = formData.repeatValue || 'none';
-    messageData.channel = formData.targetChannel;
-
-    console.log('📋 Processing message submission:', messageData);
-
-    // Validation
-    if (!messageData.targetChannel) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Please select a channel to send your message to.'
-      });
-      return;
-    }
-
-    if (messageData.type === 'help_button' && (!messageData.alertChannels || messageData.alertChannels.length === 0)) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Please select at least one alert channel for help notifications.'
-      });
-      return;
-    }
-
-    // Check if scheduling in the past
-    if (messageData.repeat === 'none' && isDateTimeInPast(messageData.date, messageData.time)) {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Cannot schedule messages in the past. Please select a future date and time.'
-      });
-      return;
-    }
-
-    // Save and schedule the message
-    scheduledMessages.push(messageData);
-    saveMessages();
-
-    const jobSuccess = scheduleJob(messageData);
-
-    if (jobSuccess) {
-      const successMessage = `✅ ${messageData.type.replace('_', ' ')} message scheduled successfully!${cat()}\n\n` +
-        `📍 Channel: <#${messageData.channel}>\n` +
-        `📅 Date: ${formatDateDisplay(messageData.date)}\n` +
-        `🕐 Time: ${formatTimeDisplay(messageData.time)}\n` +
-        `🔄 Repeat: ${messageData.repeat !== 'none' ? messageData.repeat : 'One-time only'}`;
-
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: successMessage
-      });
-
-      console.log(`✅ Message scheduled successfully: ${messageData.id}`);
-    } else {
-      await client.chat.postEphemeral({
-        channel: userId,
-        user: userId,
-        text: '❌ Failed to schedule message. Please try again.'
-      });
-    }
-
-    // Clean up session data
-    sessionData.delete(userId);
-
-  } catch (error) {
-    console.error('❌ Error handling scheduler submission:', error);
-
-    await client.chat.postEphemeral({
-      channel: body.user.id,
-      user: body.user.id,
-      text: '❌ An error occurred while scheduling your message. Please try again.'
-    });
-  }
-});
-
-// ================================
-// POLL VOTING HANDLERS
-// ================================
-app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-
-  try {
-    const actionData = JSON.parse(action.value);
-    const { pollId, optionIndex, option } = actionData;
-    const userId = body.user.id;
-
-    // Skip if this is a preview poll
-    if (pollId === 'preview') {
-      console.log('👆 Preview poll vote clicked (non-functional)');
-      return;
-    }
-
-    if (!pollVotes[pollId]) {
-      pollVotes[pollId] = {};
-    }
-
-    // Toggle vote (allow changing votes)
-    if (pollVotes[pollId][userId] === optionIndex) {
-      delete pollVotes[pollId][userId];
-    } else {
-      pollVotes[pollId][userId] = optionIndex;
-    }
-
-    savePollData();
-
-    // Update the message with new vote counts
-    const pollData = pollMessages.get(pollId);
-    if (pollData) {
-      const voteCounts = {};
-      Object.values(pollVotes[pollId]).forEach(voteIndex => {
-        voteCounts[voteIndex] = (voteCounts[voteIndex] || 0) + 1;
-      });
-
-      const blocks = generateMessageBlocks('poll', {
-        id: pollId,
-        text: pollData.question,
-        pollOptions: pollData.options.join('\n')
-      });
-
-      // Update vote counts in the blocks
-      blocks.forEach((block, blockIndex) => {
-        if (block.type === 'context' && blockIndex > 2) {
-          const optionIndex = Math.floor((blockIndex - 3) / 2);
-          const voteCount = voteCounts[optionIndex] || 0;
-          block.elements[0].text = `${voteCount} vote${voteCount !== 1 ? 's' : ''}`;
+    await handleSubmitMessage(body, client);
+  } catch (e) {
+    console.error('submit_message error', e);
+    try {
+      await client.views.update({
+        view_id: body.view.id,
+        view: {
+          type: 'modal',
+          title: { type: 'plain_text', text: 'Error' },
+          close: { type: 'plain_text', text: 'Close' },
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'An error occurred. Check logs.' } }]
         }
       });
-
-      await client.chat.update({
-        channel: pollData.channel,
-        ts: body.message.ts,
-        text: 'Poll message',
-        blocks
-      });
-    }
-
-    console.log(`🗳️ Vote recorded: User ${userId} voted for option ${optionIndex} in poll ${pollId}`);
-
-  } catch (error) {
-    console.error('❌ Error handling poll vote:', error);
+    } catch (u) { console.error('Failed to show error modal', u); }
   }
 });
 
-// ================================
-// HELP BUTTON HANDLERS
-// ================================
-app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
+// Poll submit via a 'submit_poll' action (we'll wire preview -> schedule -> submit pattern)
+app.action('submit_poll', async ({ ack, body, client }) => {
   await ack();
-
   try {
-    const actionData = JSON.parse(action.value);
-    const alertChannels = actionData.alertChannels || [];
-    const user = body.user.id;
-    const channel = body.channel.id;
+    await handleSubmitPoll(body, client);
+  } catch (e) {
+    console.error('submit_poll error', e);
+  }
+});
 
-    // Skip if this is a preview help button
-    if (actionData.msgId === 'preview') {
-      console.log('👆 Preview help button clicked (non-functional)');
+// ============================================
+// Overflow / direct action handlers (delete/edit/send/close) for messages & polls
+// We use simple action ids / overflow options (e.g., delete_msg_<id>, edit_msg_<id>)
+// ============================================
+
+// Messages overflow option value parsing helper
+function parseOverflowValue(val) {
+  // Expected patterns: 'edit_msg_<id>', 'delete_msg_<id>', 'send_msg_<id>'
+  const parts = (val || '').split('_');
+  const action = parts[0];
+  const type = parts[1];
+  const id = parts.slice(2).join('_');
+  return { action, type, id };
+}
+
+// catch overflow actions using regex
+app.action(/^msg_overflow_.*/, async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const selected = body.actions[0].selected_option?.value || body.actions[0].value;
+    if (!selected) {
+      console.warn('msg_overflow missing selected value', body.actions[0]);
       return;
     }
+    const { action, type, id } = parseOverflowValue(selected);
+    const userId = body.user.id;
 
-    if (alertChannels.length === 0) {
-      await client.chat.postEphemeral({
-        channel,
-        user,
-        text: '❌ No alert channels configured for this help button.'
-      });
+    if (action === 'edit' && type === 'msg') {
+      const msg = dataStore.scheduledMessages.get(id);
+      if (!msg) {
+        await client.chat.postEphemeral({ channel: userId, user: userId, text: `Message not found.` });
+        return;
+      }
+      // push or update modal? We're using update to replace current modal with the edit form
+      // build a session object from existing message
+      const session = { ...msg };
+      dataStore.userSessions.set(userId, session);
+      await client.views.update({ view_id: body.view.id, view: ViewBuilder.form(msg.type, session) });
+    } else if (action === 'delete' && type === 'msg') {
+      // remove from datastore and cancel job
+      dataStore.scheduledMessages.delete(id);
+      if (dataStore.activeJobs.has(id)) {
+        const job = dataStore.activeJobs.get(id);
+        try { job.cancel?.(); } catch (e) { /* ignore */ }
+        dataStore.activeJobs.delete(id);
+      }
+      saveScheduledMessages();
+      // refresh scheduled list view
+      await client.views.update({ view_id: body.view.id, view: ViewBuilder.scheduledList(body.user.id) });
+    } else if (action === 'send' && type === 'msg') {
+      const msg = dataStore.scheduledMessages.get(id);
+      if (msg) {
+        await sendMessageToChannel(msg, client);
+      }
+    } else {
+      console.warn('Unhandled msg overflow action', action, type, id);
+    }
+  } catch (e) {
+    console.error('msg_overflow handler error', e);
+  }
+});
+
+// Polls overflow - similar approach for poll objects
+app.action(/^poll_overflow_.*/, async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const selected = body.actions[0].selected_option?.value || body.actions[0].value;
+    if (!selected) {
+      console.warn('poll_overflow missing selected value', body.actions[0]);
       return;
     }
+    const parts = selected.split('_'); // e.g., close_poll_<id>, delete_poll_<id>
+    const action = parts[0];
+    const type = parts[1];
+    const id = parts.slice(2).join('_');
 
-    let successCount = 0;
-    for (const alertChannel of alertChannels) {
-      try {
-        await client.chat.postMessage({
-          channel: alertChannel,
-          text: `🆘 <@${user}> needs backup in <#${channel}> ${cat()}`
+    if (action === 'close' && type === 'poll') {
+      const poll = dataStore.polls.get(id);
+      if (poll) {
+        poll.status = 'closed';
+        // post results
+        const results = {};
+        (poll.options || []).forEach(opt => results[opt] = 0);
+        Object.values(poll.votes || {}).forEach(userVotes => {
+          userVotes.forEach(v => { if (results[v] !== undefined) results[v]++; });
         });
-        successCount++;
-      } catch (e) {
-        console.error(`❌ Alert failed for channel ${alertChannel}:`, e);
+        const total = Object.keys(poll.votes || {}).length;
+        const blocks = [{ type: 'header', text: { type: 'plain_text', text: '📊 Poll Results' } }, { type: 'section', text: { type: 'mrkdwn', text: `*${poll.question}*` } }, { type: 'divider' }];
+        Object.entries(results).forEach(([option, votes]) => {
+          const pct = total > 0 ? Math.round((votes / total) * 100) : 0;
+          blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${option}*\n${pct}% (${votes} votes)` } });
+        });
+        await client.chat.postMessage({ channel: poll.channel, blocks, text: `Poll closed: ${poll.question}` });
       }
+    } else if (action === 'delete' && type === 'poll') {
+      dataStore.polls.delete(id);
+      await client.views.update({ view_id: body.view.id, view: ViewBuilder.menu() });
+    } else {
+      console.warn('Unhandled poll overflow action', action, type, id);
     }
-
-    await client.chat.postEphemeral({
-      channel,
-      user,
-      text: `✅ Backup request sent to ${successCount}/${alertChannels.length} channels.`
-    });
-
-    if (successCount > 0) {
-      await client.chat.postMessage({
-        channel,
-        text: `🆘 <@${user}> has requested backup assistance ${cat()}`
-      });
-    }
-
-    console.log(`🆘 Help request: User ${user} alerted ${successCount} channels`);
-
-  } catch (error) {
-    console.error('❌ Error handling help button:', error);
+  } catch (e) {
+    console.error('poll_overflow handler error', e);
   }
 });
 
-// ================================
-// DEBUG COMMANDS
-// ================================
-app.command('/cat-debug', async ({ ack, body, client }) => {
+// ============================================
+// Vote handlers for polls
+// action id pattern: poll_vote_<pollId>_<idx>
+// ============================================
+
+app.action(/^poll_vote_.*/, async ({ ack, body, client }) => {
   await ack();
-  const channelId = body.channel_id;
-  const userId = body.user_id;
-
   try {
-    const debugInfo = `🐱 *Cat Scratch Bot Debug Info*${cat()}\n\n` +
-      `*Status:* Running ✅\n` +
-      `*Uptime:* ${Math.floor(process.uptime())} seconds\n` +
-      `*Scheduled Messages:* ${scheduledMessages.length}\n` +
-      `*Active Jobs:* ${jobs.size}\n` +
-      `*Poll Data:* ${Object.keys(pollVotes).length} polls\n` +
-      `*Memory Usage:* ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
-      `*Current EST Time:* ${currentTimeInEST()}`;
+    const actionId = body.actions[0].action_id; // e.g., poll_vote_poll_12345_0
+    const [ , , pollId, idxStr ] = actionId.split('_');
+    const idx = parseInt(idxStr, 10);
+    const poll = dataStore.polls.get(pollId);
+    if (!poll || poll.status !== 'active') return;
+    const userId = body.user.id;
+    const option = (poll.pollOptions || '').split('\n')[idx];
+    if (!option) return;
 
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: debugInfo
-    });
+    // manage votes
+    if (!poll.votes) poll.votes = {};
+    if (!poll.votes[userId]) poll.votes[userId] = [];
 
-    console.log(`🔧 Debug info requested by user ${userId}`);
-  } catch (error) {
-    console.error('❌ Debug command failed:', error);
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: '❌ Debug failed - check console logs'
-    });
-  }
-});
-
-// ================================
-// ERROR HANDLING & CLEANUP
-// ================================
-app.error((error) => {
-  console.error('🔥 Global Slack app error:', error);
-});
-
-// Cleanup expired messages every hour
-cron.schedule('0 * * * *', () => {
-  console.log('🧹 Running hourly cleanup...');
-
-  const beforeCount = scheduledMessages.length;
-  scheduledMessages = scheduledMessages.filter(msg => {
-    if (msg.repeat !== 'none') return true;
-    const isPast = isDateTimeInPast(msg.date, msg.time);
-    if (isPast && jobs.has(msg.id)) {
-      try {
-        jobs.get(msg.id).destroy();
-        jobs.delete(msg.id);
-        console.log(`🗑️ Cleaned up expired job: ${msg.id}`);
-      } catch (e) {
-        console.error(`❌ Error cleaning up job ${msg.id}:`, e);
+    if (poll.pollType === 'multiple') {
+      const pos = poll.votes[userId].indexOf(option);
+      if (pos > -1) poll.votes[userId].splice(pos, 1);
+      else poll.votes[userId].push(option);
+    } else {
+      // single choice - overwrite
+      if (poll.votes[userId].length === 1 && poll.votes[userId][0] === option) {
+        // same vote -> unvote
+        poll.votes[userId] = [];
+      } else {
+        poll.votes[userId] = [option];
       }
     }
-    return !isPast;
-  });
 
-  if (scheduledMessages.length !== beforeCount) {
-    saveMessages();
-    console.log(`🧹 Removed ${beforeCount - scheduledMessages.length} expired messages`);
+    dataStore.polls.set(pollId, poll);
+
+    // update original poll message if we have messageTs
+    if (poll.messageTs && poll.channel) {
+      // rebuild blocks with counts
+      const options = (poll.pollOptions || '').split('\n').filter(Boolean);
+      const blocks = [{ type: 'header', text: { type: 'plain_text', text: poll.question || poll.title || 'Poll' } }];
+      blocks.push({ type: 'divider' });
+      const elements = options.map((opt, i) => {
+        const votes = Object.values(poll.votes || {}).filter(vs => vs.includes(opt)).length;
+        return {
+          type: 'button',
+          text: { type: 'plain_text', text: `${opt} (${votes})` },
+          action_id: `poll_vote_${pollId}_${i}`,
+          value: `${i}`
+        };
+      });
+      for (let i = 0; i < elements.length; i += 5) {
+        blocks.push({ type: 'actions', elements: elements.slice(i, i + 5) });
+      }
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `${Object.keys(poll.votes || {}).length} votes` }] });
+
+      try {
+        await client.chat.update({ channel: poll.channel, ts: poll.messageTs, blocks, text: poll.title || 'Poll' });
+      } catch (e) {
+        console.error('Failed to update poll message', e);
+      }
+    }
+
+    // ephemeral confirmation
+    try {
+      await client.chat.postEphemeral({ channel: body.channel?.id || poll.channel, user: userId, text: `✅ Vote recorded!` });
+    } catch (e) {
+      // ignore ephemeral errors
+    }
+  } catch (e) {
+    console.error('poll_vote handler error', e);
   }
-}, { timezone: 'America/New_York' });
+});
 
-// Memory management
-setInterval(() => {
-  const used = process.memoryUsage();
-  const mb = (bytes) => Math.round(bytes / 1024 / 1024);
-  console.log(`💾 Memory usage: ${mb(used.heapUsed)}MB heap, ${mb(used.rss)}MB RSS`);
+// ============================================
+// Startup: re-schedule any persisted scheduled messages
+// ============================================
 
-  if (mb(used.heapUsed) > 200) {
-    userProfileCache.clear();
-    console.log('🧹 Cleared user profile cache due to high memory usage');
-  }
-}, 600000); // Every 10 minutes
-
-// ================================
-// STARTUP SEQUENCE
-// ================================
 (async () => {
   try {
-    // Load data first
-    loadMessages();
-    loadPollData();
-
-    // Start the Slack app
-    await app.start();
-
-    console.log('🐱 Cat Scratch Slack Bot is running in Socket Mode!');
-    console.log('🤖 Ready to handle /cat commands');
-    console.log('📡 Socket Mode: Enabled (no Request URLs needed)');
-    console.log(`📂 Loaded ${scheduledMessages.length} scheduled messages`);
-    console.log(`📊 Loaded poll data for ${Object.keys(pollVotes).length} polls`);
-
-    // Re-register all scheduled jobs
-    reRegisterAllJobs();
-
-    console.log(`⚡ Active jobs: ${jobs.size}`);
-    console.log(`🕐 Current EST time: ${currentTimeInEST()}`);
-    
-    // Display cron job URL for external services
-    const domain = process.env.REPLIT_DEV_DOMAIN || process.env.REPLIT_DOMAINS;
-    if (domain) {
-      console.log(`🔗 Cron job URL: https://${domain}/ping`);
+    for (const msg of Array.from(dataStore.scheduledMessages.values())) {
+      // schedule only if not completed (repeat none & in past)
+      if (msg.repeat === 'none' && utils.isDateTimeInPast(msg.date, msg.time)) {
+        // don't schedule
+        continue;
+      }
+      await scheduleJobForMessage(msg, app.client);
     }
-    console.log('🔗 Health check available at: /ping and /health');
-    console.log('📱 Bot features:');
-    console.log('   • Daily Check-ins with reactions');
-    console.log('   • Help Buttons with alerts');
-    console.log('   • Interactive Polls with voting');
-    console.log('   • Custom Messages');
-    console.log('   • Full scheduling system');
-    console.log('   • Message management');
-    console.log('✅ All systems ready! Use /cat to start.');
 
-  } catch (error) {
-    console.error('❌ Failed to start the app:', error);
+    await app.start();
+    console.log('⚡ PM Squad Bot (Polls + Scheduler) is running!');
+  } catch (e) {
+    console.error('Failed to start app', e);
     process.exit(1);
   }
 })();
-
-// ================================
-// GRACEFUL SHUTDOWN
-// ================================
-process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received, shutting down gracefully...');
-  saveMessages();
-  savePollData();
-  jobs.forEach((job, id) => {
-    try {
-      job.destroy();
-      console.log(`🧹 Destroyed job: ${id}`);
-    } catch (e) {
-      console.log(`❌ Could not destroy job ${id}: ${e.message}`);
-    }
-  });
-  console.log('👋 Shutdown complete');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('🛑 SIGINT received, shutting down gracefully...');
-  saveMessages();
-  savePollData();
-  jobs.forEach((job, id) => {
-    try {
-      job.destroy();
-      console.log(`🧹 Destroyed job: ${id}`);
-    } catch (e) {
-      console.log(`❌ Could not destroy job ${id}: ${e.message}`);
-    }
-  });
-  console.log('👋 Shutdown complete');
-  process.exit(0);
-});
-
-module.exports = { app, ModalBuilder };
