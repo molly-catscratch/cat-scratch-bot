@@ -1,17 +1,9 @@
 /**
  * PM Squad Bot - Unified (Polls + Scheduler)
- * - Navigation uses views.update() (no views.push)
- * - Per-user session state stored in dataStore.userSessions
- * - Centralized submit handlers:
- *    - handleSubmitMessage
- *    - handleSubmitPoll
- * - Clear, direct action_ids for overflow/edit/delete/close
- * - ViewBuilder class abstracts modal builders (clean & reusable)
+ * Full master file (polls + scheduler + navigation + overflow + voting)
  *
  * ENV: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_SIGNING_SECRET
- *
- * npm packages: @slack/bolt node-cron node-schedule (or none if not using schedule),
- *               dotenv
+ * npm: @slack/bolt node-cron node-schedule dotenv
  */
 
 const { App, LogLevel } = require('@slack/bolt');
@@ -39,7 +31,6 @@ const app = new App({
 
 const SCHEDULE_FILE = './scheduledMessages.json';
 let scheduledMessages = [];
-const jobs = new Map();                 // cron/node-schedule jobs
 const dataStore = {
   polls: new Map(),                     // pollId -> poll object
   scheduledMessages: new Map(),         // msgId -> message object
@@ -113,7 +104,9 @@ function getFormValue(values, blockId, actionId, type = 'value') {
   try {
     const block = values?.[blockId]?.[actionId];
     if (!block) return null;
-    if (type === 'selected') return block?.selected_option?.value;
+    // static_select and radio_buttons -> selected_option.value
+    if (type === 'selected') return block?.selected_option?.value || null;
+    // conversation selects
     if (type === 'conversation') return block?.selected_conversation || block?.value || null;
     if (type === 'conversations') return block?.selected_conversations || [];
     if (type === 'time') return block?.selected_time || null;
@@ -130,7 +123,6 @@ const cat = () => Math.random() < 0.35 ? ` ${['₍^. .^₎⟆', 'ᓚ₍ ^. .^₎
 
 // ============================================
 // ViewBuilder - builds modal views (reusable)
- // We mirror the patterns from your older working version but keep abstraction for reuse
 // ============================================
 
 class ViewBuilder {
@@ -218,14 +210,15 @@ class ViewBuilder {
       { type: 'divider' }
     ];
 
-    const addTitleInput = (page !== 'capacity' && page !== 'help');
-
+    // only show short explanatory text for capacity/help; do NOT inject template text here
     if (page === 'capacity') {
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_Using default capacity check template. Feel free to customize the message text below._' } });
     }
     if (page === 'help') {
       blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_Using default help button template. Feel free to customize the message text below._' } });
     }
+
+    const addTitleInput = (page !== 'capacity' && page !== 'help');
 
     if (addTitleInput) {
       blocks.push({
@@ -235,6 +228,7 @@ class ViewBuilder {
         element: {
           type: 'plain_text_input',
           action_id: 'title_input',
+          // IMPORTANT: only use session-provided data.text, do not re-inject templates here
           initial_value: data.title || '',
           placeholder: { type: 'plain_text', text: 'Message title...' }
         },
@@ -250,7 +244,8 @@ class ViewBuilder {
         type: 'plain_text_input',
         action_id: 'text_input',
         multiline: true,
-        initial_value: data.text || (page === 'capacity' ? (data.templates?.capacity || '') : (page === 'help' ? (data.templates?.help || '') : '')),
+        // IMPORTANT fix: use only data.text (no template fallback here to avoid duplication)
+        initial_value: data.text || '',
         placeholder: { type: 'plain_text', text: 'Message content...' }
       }
     });
@@ -353,17 +348,18 @@ class ViewBuilder {
 
     if (data.type === 'poll') {
       if (data.pollOptions && data.pollType !== 'open') {
-        previewTextParts.push('\n' + data.pollOptions.split('\n').map((o, i) => `${i + 1}. ${o}`).join('\n'));
+        previewTextParts.push(data.pollOptions.split('\n').map((o, i) => `${i + 1}. ${o}`).join('\n'));
       } else if (data.pollType === 'open') {
-        previewTextParts.push('\n_Open discussion - responses in thread_');
+        previewTextParts.push('_Open discussion - responses in thread_');
       }
     }
 
+    // NOTE: removed triple-backticks to allow markdown rendering (fixes poll preview formatting)
     const previewBlock = {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Preview:*\n\`\`\`${previewTextParts.join('\n\n').substring(0, 500)}${previewTextParts.join('\n\n').length > 500 ? '...' : ''}\`\`\`${cat()}`
+        text: `*Preview:*\n${previewTextParts.join('\n\n').substring(0, 1000)}${cat()}`
       }
     };
 
@@ -621,9 +617,10 @@ app.command('/pm', async ({ ack, body, client, logger }) => {
       // If switching type, reset relevant fields
       if (!session.type || session.type !== messageType) {
         if (messageType === 'capacity') {
-          session = { type: 'capacity', title: '', text: '', scheduleType: 'schedule' };
+          // set template here once so it doesn't get duplicated by initial_value in the form
+          session = { type: 'capacity', title: '', text: (session.text || 'Capacity: Please report availability.'), scheduleType: 'schedule' };
         } else if (messageType === 'help') {
-          session = { type: 'help', title: '', text: '', alertChannels: [], scheduleType: 'schedule' };
+          session = { type: 'help', title: '', text: (session.text || 'Help needed — press the button!'), alertChannels: [], scheduleType: 'schedule' };
         } else if (messageType === 'poll') {
           session = { type: 'poll', title: '', text: '', pollType: 'single', pollOptions: 'Option 1\nOption 2', pollSettings: [], scheduleType: 'schedule' };
         } else {
@@ -1173,7 +1170,6 @@ app.action(/^msg_overflow_.*/, async ({ ack, body, client }) => {
         await client.chat.postEphemeral({ channel: userId, user: userId, text: `Message not found.` });
         return;
       }
-      // push or update modal? We're using update to replace current modal with the edit form
       // build a session object from existing message
       const session = { ...msg };
       dataStore.userSessions.set(userId, session);
@@ -1222,17 +1218,17 @@ app.action(/^poll_overflow_.*/, async ({ ack, body, client }) => {
         poll.status = 'closed';
         // post results
         const results = {};
-        (poll.options || []).forEach(opt => results[opt] = 0);
+        (poll.pollOptions || '').split('\n').filter(Boolean).forEach(opt => results[opt] = 0);
         Object.values(poll.votes || {}).forEach(userVotes => {
           userVotes.forEach(v => { if (results[v] !== undefined) results[v]++; });
         });
         const total = Object.keys(poll.votes || {}).length;
-        const blocks = [{ type: 'header', text: { type: 'plain_text', text: '📊 Poll Results' } }, { type: 'section', text: { type: 'mrkdwn', text: `*${poll.question}*` } }, { type: 'divider' }];
+        const blocks = [{ type: 'header', text: { type: 'plain_text', text: '📊 Poll Results' } }, { type: 'section', text: { type: 'mrkdwn', text: `*${poll.title || 'Poll'}*` } }, { type: 'divider' }];
         Object.entries(results).forEach(([option, votes]) => {
           const pct = total > 0 ? Math.round((votes / total) * 100) : 0;
           blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${option}*\n${pct}% (${votes} votes)` } });
         });
-        await client.chat.postMessage({ channel: poll.channel, blocks, text: `Poll closed: ${poll.question}` });
+        await client.chat.postMessage({ channel: poll.channel, blocks, text: `Poll closed: ${poll.title || 'Poll'}` });
       }
     } else if (action === 'delete' && type === 'poll') {
       dataStore.polls.delete(id);
@@ -1254,8 +1250,15 @@ app.action(/^poll_vote_.*/, async ({ ack, body, client }) => {
   await ack();
   try {
     const actionId = body.actions[0].action_id; // e.g., poll_vote_poll_12345_0
-    const [ , , pollId, idxStr ] = actionId.split('_');
+    // actionId format: poll_vote_<pollId>_<idx>
+    const parts = actionId.split('_');
+    // parts: ['poll','vote','<pollId...?>','<idx>'] - poll id may contain underscores, so rebuild
+    // Let's find idx at the end
+    const idxStr = parts.pop();
     const idx = parseInt(idxStr, 10);
+    // remaining parts after removing last two entries are ['poll','vote','<pollIdParts...>']
+    // so poll id is everything after 'poll_vote_'
+    const pollId = parts.slice(2).join('_');
     const poll = dataStore.polls.get(pollId);
     if (!poll || poll.status !== 'active') return;
     const userId = body.user.id;
@@ -1286,7 +1289,7 @@ app.action(/^poll_vote_.*/, async ({ ack, body, client }) => {
     if (poll.messageTs && poll.channel) {
       // rebuild blocks with counts
       const options = (poll.pollOptions || '').split('\n').filter(Boolean);
-      const blocks = [{ type: 'header', text: { type: 'plain_text', text: poll.question || poll.title || 'Poll' } }];
+      const blocks = [{ type: 'header', text: { type: 'plain_text', text: poll.title || 'Poll' } }];
       blocks.push({ type: 'divider' });
       const elements = options.map((opt, i) => {
         const votes = Object.values(poll.votes || {}).filter(vs => vs.includes(opt)).length;
