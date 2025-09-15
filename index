@@ -1,9 +1,16 @@
 /**
- * PM Squad Bot - Unified (Polls + Scheduler)
+ * PM Squad Bot - Unified (Polls + Scheduler) - FIXED VERSION
  * Full master file (polls + scheduler + navigation + overflow + voting)
  *
  * ENV: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_SIGNING_SECRET
  * npm: @slack/bolt node-cron node-schedule dotenv
+ *
+ * FIXES APPLIED:
+ * - Added missing date_picker, time_picker, repeat_select handlers
+ * - Enhanced getFormValue function for proper date/time extraction
+ * - Improved nav_schedule handler with better state management
+ * - Enhanced handleSubmitMessage with comprehensive error handling
+ * - Added debug logging throughout for troubleshooting
  */
 
 const { App, LogLevel } = require('@slack/bolt');
@@ -99,21 +106,27 @@ const utils = {
   }
 };
 
-// Helper to safely pull values from view.state.values
+// FIXED: Helper to safely pull values from view.state.values
 function getFormValue(values, blockId, actionId, type = 'value') {
   try {
     const block = values?.[blockId]?.[actionId];
     if (!block) return null;
+    
     // static_select and radio_buttons -> selected_option.value
     if (type === 'selected') return block?.selected_option?.value || null;
+    
     // conversation selects
     if (type === 'conversation') return block?.selected_conversation || block?.value || null;
     if (type === 'conversations') return block?.selected_conversations || [];
-    if (type === 'time') return block?.selected_time || null;
-    if (type === 'date') return block?.selected_date || null;
+    
+    // FIXED: date and time pickers
+    if (type === 'time') return block?.selected_time || block?.value || null;
+    if (type === 'date') return block?.selected_date || block?.value || null;
+    
+    // default to value
     return (block?.value || '').toString();
   } catch (e) {
-    console.error('getFormValue error', e);
+    console.error('getFormValue error for', blockId, actionId, type, e);
     return null;
   }
 }
@@ -516,11 +529,11 @@ app.command('/pm', async ({ ack, body, client, logger }) => {
 
 // ============================================
 // Navigation handlers (use views.update only)
-// - nav_menu, nav_scheduled, nav_preview, nav_schedule
+// - nav_menu, nav_scheduled, nav_preview
 // - form-type handlers: nav_capacity, nav_poll, nav_help, nav_custom
 // ============================================
 
-['nav_menu', 'nav_scheduled', 'nav_preview', 'nav_schedule'].forEach(actionId => {
+['nav_menu', 'nav_scheduled', 'nav_preview'].forEach(actionId => {
   app.action(actionId, async ({ ack, body, client }) => {
     await ack();
     const page = actionId.replace('nav_', '');
@@ -528,8 +541,8 @@ app.command('/pm', async ({ ack, body, client, logger }) => {
 
     try {
       let session = dataStore.userSessions.get(userId) || {};
-      // For preview/schedule we need to extract current view state
-      if ((page === 'preview' || page === 'schedule') && body.view?.state?.values) {
+      // For preview we need to extract current view state
+      if (page === 'preview' && body.view?.state?.values) {
         const values = body.view.state.values;
 
         // Title (if present)
@@ -563,22 +576,6 @@ app.command('/pm', async ({ ack, body, client, logger }) => {
           session.pollSettings = pollSettingsSel.map(s => s.value);
         }
 
-        // channel & scheduling extraction
-        session.channel = getFormValue(values, 'channel_block', 'channel_select', 'conversation') || session.channel;
-        const dateVal = getFormValue(values, 'datetime_block', 'date_picker', 'date');
-        const timeVal = getFormValue(values, 'datetime_block', 'time_picker', 'time');
-        const repeatVal = getFormValue(values, 'repeat_block', 'repeat_select', 'selected');
-
-        if (dateVal) session.date = dateVal;
-        if (timeVal) session.time = timeVal;
-        if (repeatVal) session.repeat = repeatVal;
-
-        // alertChannels for help
-        if (session.type === 'help') {
-          const alertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
-          if (alertChannels) session.alertChannels = alertChannels;
-        }
-
         dataStore.userSessions.set(userId, session);
       }
 
@@ -590,8 +587,6 @@ app.command('/pm', async ({ ack, body, client, logger }) => {
         nextView = ViewBuilder.scheduledList(userId);
       } else if (page === 'preview') {
         nextView = ViewBuilder.preview(session);
-      } else if (page === 'schedule') {
-        nextView = ViewBuilder.schedule(session);
       } else {
         nextView = ViewBuilder.menu();
       }
@@ -604,6 +599,94 @@ app.command('/pm', async ({ ack, body, client, logger }) => {
       console.error(`Navigation ${actionId} error:`, e);
     }
   });
+});
+
+// FIXED: Improved nav_schedule handler with better state extraction
+app.action('nav_schedule', async ({ ack, body, client }) => {
+  await ack();
+  const userId = body.user.id;
+
+  try {
+    let session = dataStore.userSessions.get(userId) || {};
+    
+    // Extract current view state if coming from preview
+    if (body.view?.state?.values) {
+      const values = body.view.state.values;
+      
+      console.log('Extracting state from view:', Object.keys(values)); // Debug log
+      
+      // Title (if present)
+      if (values.title_block?.title_input) {
+        session.title = getFormValue(values, 'title_block', 'title_input') || session.title;
+      }
+
+      // Text (always)
+      const textVal = getFormValue(values, 'text_block', 'text_input');
+      if (textVal !== null) session.text = textVal;
+
+      // Poll-specific extraction
+      if (session.type === 'poll') {
+        // poll type radio
+        const pollType = values?.poll_type_section?.poll_type_radio?.selected_option?.value;
+        if (pollType) session.pollType = pollType;
+
+        // poll options (if not open type)
+        if (session.pollType !== 'open') {
+          const opts = [];
+          let idx = 0;
+          while (values[`option_${idx}_block`]) {
+            const v = getFormValue(values, `option_${idx}_block`, `option_${idx}_input`);
+            if (v) opts.push(v);
+            idx++;
+          }
+          if (opts.length > 0) session.pollOptions = opts.join('\n');
+        }
+
+        // settings checkboxes
+        const pollSettingsSel = values?.poll_settings_section?.poll_settings_checkboxes?.selected_options || [];
+        session.pollSettings = pollSettingsSel.map(s => s.value);
+      }
+      
+      dataStore.userSessions.set(userId, session);
+    }
+
+    // Set defaults for scheduling if not already set
+    if (!session.date) session.date = utils.todayInEST();
+    if (!session.time) session.time = '09:00';
+    if (!session.repeat) session.repeat = 'none';
+    if (!session.scheduleType) session.scheduleType = 'schedule';
+
+    dataStore.userSessions.set(userId, session);
+
+    await client.views.update({
+      view_id: body.view.id,
+      view: ViewBuilder.schedule(session)
+    });
+  } catch (e) {
+    console.error('nav_schedule error:', e);
+    // Show error to user
+    try {
+      await client.views.update({
+        view_id: body.view.id,
+        view: {
+          type: 'modal',
+          title: { type: 'plain_text', text: 'Error' },
+          close: { type: 'plain_text', text: 'Close' },
+          blocks: [
+            { 
+              type: 'section', 
+              text: { 
+                type: 'mrkdwn', 
+                text: `Something went wrong navigating to schedule. Please try again.\n\nError: ${e.message}` 
+              } 
+            }
+          ]
+        }
+      });
+    } catch (updateError) {
+      console.error('Failed to show error modal:', updateError);
+    }
+  }
 });
 
 ['nav_capacity', 'nav_poll', 'nav_help', 'nav_custom'].forEach(actionId => {
@@ -641,6 +724,52 @@ app.command('/pm', async ({ ack, body, client, logger }) => {
       console.error(`${actionId} handler error`, e);
     }
   });
+});
+
+// ============================================
+// ADDED: Missing Date/Time/Repeat Picker Handlers
+// ============================================
+
+app.action('date_picker', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const selectedDate = body.actions[0].selected_date;
+    const session = dataStore.userSessions.get(userId) || {};
+    session.date = selectedDate;
+    dataStore.userSessions.set(userId, session);
+    console.log('Date selected:', selectedDate, 'for user', userId);
+  } catch (e) {
+    console.error('date_picker error', e);
+  }
+});
+
+app.action('time_picker', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const selectedTime = body.actions[0].selected_time;
+    const session = dataStore.userSessions.get(userId) || {};
+    session.time = selectedTime;
+    dataStore.userSessions.set(userId, session);
+    console.log('Time selected:', selectedTime, 'for user', userId);
+  } catch (e) {
+    console.error('time_picker error', e);
+  }
+});
+
+app.action('repeat_select', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const selectedRepeat = body.actions[0].selected_option?.value;
+    const session = dataStore.userSessions.get(userId) || {};
+    session.repeat = selectedRepeat;
+    dataStore.userSessions.set(userId, session);
+    console.log('Repeat selected:', selectedRepeat, 'for user', userId);
+  } catch (e) {
+    console.error('repeat_select error', e);
+  }
 });
 
 // ============================================
@@ -879,92 +1008,163 @@ async function sendMessageToChannel(msg, client) {
   }
 }
 
+// FIXED: Enhanced handleSubmitMessage with better error handling and state extraction
 async function handleSubmitMessage(body, client) {
   const userId = body.user.id;
   const session = dataStore.userSessions.get(userId) || {};
   const values = body.view?.state?.values || {};
 
-  // extract state (similar logic used earlier)
-  if (values.title_block?.title_input) session.title = getFormValue(values, 'title_block', 'title_input') || session.title;
-  session.text = getFormValue(values, 'text_block', 'text_input') || session.text;
-  session.channel = getFormValue(values, 'channel_block', 'channel_select', 'conversation') || session.channel;
-  const dateVal = getFormValue(values, 'datetime_block', 'date_picker', 'date');
-  const timeVal = getFormValue(values, 'datetime_block', 'time_picker', 'time');
-  const repeatVal = getFormValue(values, 'repeat_block', 'repeat_select', 'selected');
-  if (dateVal) session.date = dateVal;
-  if (timeVal) session.time = timeVal;
-  if (repeatVal) session.repeat = repeatVal;
-  if (session.type === 'help') {
-    const alertCh = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
-    if (alertCh) session.alertChannels = alertCh;
-  }
+  console.log('handleSubmitMessage - session before extraction:', session);
+  console.log('handleSubmitMessage - form values:', Object.keys(values));
 
-  // default values
-  session.scheduleType = session.scheduleType || 'schedule';
-  session.repeat = session.repeat || 'none';
-  session.time = session.time || '09:00';
-  session.date = session.date || utils.todayInEST();
+  try {
+    // Extract form state more carefully
+    if (values.title_block?.title_input) {
+      const titleVal = getFormValue(values, 'title_block', 'title_input');
+      if (titleVal !== null) session.title = titleVal;
+    }
+    
+    const textVal = getFormValue(values, 'text_block', 'text_input');
+    if (textVal !== null) session.text = textVal;
+    
+    const channelVal = getFormValue(values, 'channel_block', 'channel_select', 'conversation');
+    if (channelVal) session.channel = channelVal;
+    
+    // Date and time extraction with better error handling
+    const dateVal = getFormValue(values, 'datetime_block', 'date_picker', 'date');
+    const timeVal = getFormValue(values, 'datetime_block', 'time_picker', 'time');
+    const repeatVal = getFormValue(values, 'repeat_block', 'repeat_select', 'selected');
+    
+    if (dateVal) session.date = dateVal;
+    if (timeVal) session.time = timeVal;
+    if (repeatVal) session.repeat = repeatVal;
+    
+    // Help-specific
+    if (session.type === 'help') {
+      const alertCh = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
+      if (alertCh && Array.isArray(alertCh)) session.alertChannels = alertCh;
+    }
 
-  // Validation
-  if (!session.channel) {
-    await client.chat.postEphemeral({ channel: body.user.id, user: userId, text: `Please select a channel first.${cat()}` });
-    return;
-  }
-  if (session.scheduleType === 'schedule' && session.repeat === 'none' && utils.isDateTimeInPast(session.date, session.time)) {
-    await client.chat.postEphemeral({ channel: body.user.id, user: userId, text: `Cannot schedule messages in the past.${cat()}` });
-    return;
-  }
-  if (session.type === 'help' && (!session.alertChannels || session.alertChannels.length === 0)) {
-    await client.chat.postEphemeral({ channel: body.user.id, user: userId, text: `Please select at least one alert channel for help notifications.${cat()}` });
-    return;
-  }
+    // Apply defaults
+    session.scheduleType = session.scheduleType || 'schedule';
+    session.repeat = session.repeat || 'none';
+    session.time = session.time || '09:00';
+    session.date = session.date || utils.todayInEST();
 
-  // create message object
-  if (!session.id) session.id = utils.generateId('msg_');
-  const messageObj = {
-    id: session.id,
-    userId,
-    type: session.type || 'custom',
-    title: session.title || '',
-    text: session.text || '',
-    channel: session.channel,
-    scheduleType: session.scheduleType,
-    date: session.date,
-    time: session.time,
-    repeat: session.repeat,
-    alertChannels: session.alertChannels || []
-  };
+    console.log('handleSubmitMessage - session after extraction:', session);
 
-  if (session.scheduleType === 'now') {
-    // post immediately
-    const success = await sendMessageToChannel(messageObj, client);
+    // Validation
+    if (!session.channel) {
+      await client.chat.postEphemeral({ 
+        channel: body.user.id, 
+        user: userId, 
+        text: `Please select a channel first.${cat()}` 
+      });
+      return;
+    }
+    
+    if (session.scheduleType === 'schedule' && session.repeat === 'none') {
+      if (utils.isDateTimeInPast(session.date, session.time)) {
+        await client.chat.postEphemeral({ 
+          channel: body.user.id, 
+          user: userId, 
+          text: `Cannot schedule messages in the past. Selected: ${session.date} at ${session.time}${cat()}` 
+        });
+        return;
+      }
+    }
+    
+    if (session.type === 'help' && (!session.alertChannels || session.alertChannels.length === 0)) {
+      await client.chat.postEphemeral({ 
+        channel: body.user.id, 
+        user: userId, 
+        text: `Please select at least one alert channel for help notifications.${cat()}` 
+      });
+      return;
+    }
+
+    // Create message object
+    if (!session.id) session.id = utils.generateId('msg_');
+    const messageObj = {
+      id: session.id,
+      userId,
+      type: session.type || 'custom',
+      title: session.title || '',
+      text: session.text || '',
+      channel: session.channel,
+      scheduleType: session.scheduleType,
+      date: session.date,
+      time: session.time,
+      repeat: session.repeat,
+      alertChannels: session.alertChannels || []
+    };
+
+    console.log('handleSubmitMessage - final messageObj:', messageObj);
+
+    if (session.scheduleType === 'now') {
+      // Post immediately
+      const success = await sendMessageToChannel(messageObj, client);
+      await client.views.update({
+        view_id: body.view.id,
+        view: {
+          type: 'modal',
+          title: { type: 'plain_text', text: success ? 'Message Posted!' : 'Post Failed' },
+          close: { type: 'plain_text', text: 'Close' },
+          blocks: [{ 
+            type: 'section', 
+            text: { 
+              type: 'mrkdwn', 
+              text: success 
+                ? `${messageObj.type} message posted to <#${messageObj.channel}>!${cat()}` 
+                : `Failed to post to <#${messageObj.channel}>. Make sure I'm invited.` 
+            } 
+          }]
+        }
+      });
+    } else {
+      // Schedule for later
+      dataStore.scheduledMessages.set(messageObj.id, messageObj);
+      saveScheduledMessages();
+      await scheduleJobForMessage(messageObj, client);
+      
+      await client.views.update({
+        view_id: body.view.id,
+        view: {
+          type: 'modal',
+          title: { type: 'plain_text', text: 'Message Scheduled!' },
+          close: { type: 'plain_text', text: 'Close' },
+          blocks: [{ 
+            type: 'section', 
+            text: { 
+              type: 'mrkdwn', 
+              text: `${messageObj.type} message scheduled for <#${messageObj.channel}>!${cat()}\n\n${messageObj.date} at ${utils.formatTimeDisplay(messageObj.time)}\nRepeat: ${messageObj.repeat !== 'none' ? messageObj.repeat : 'One-time'}` 
+            } 
+          }]
+        }
+      });
+    }
+
+    // Clear session
+    dataStore.userSessions.delete(userId);
+    
+  } catch (e) {
+    console.error('handleSubmitMessage error:', e);
     await client.views.update({
       view_id: body.view.id,
       view: {
         type: 'modal',
-        title: { type: 'plain_text', text: success ? 'Message Posted!' : 'Post Failed' },
+        title: { type: 'plain_text', text: 'Submission Error' },
         close: { type: 'plain_text', text: 'Close' },
-        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: success ? `${messageObj.type} message posted to <#${messageObj.channel}>!${cat()}` : `Failed to post to <#${messageObj.channel}>. Make sure I'm invited.` } }]
-      }
-    });
-  } else {
-    // schedule for later: persist and schedule
-    dataStore.scheduledMessages.set(messageObj.id, messageObj);
-    saveScheduledMessages();
-    await scheduleJobForMessage(messageObj, client);
-    await client.views.update({
-      view_id: body.view.id,
-      view: {
-        type: 'modal',
-        title: { type: 'plain_text', text: 'Message Scheduled!' },
-        close: { type: 'plain_text', text: 'Close' },
-        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${messageObj.type} message scheduled for <#${messageObj.channel}>!${cat()}\n\n${messageObj.date} at ${utils.formatTimeDisplay(messageObj.time)}\nRepeat: ${messageObj.repeat !== 'none' ? messageObj.repeat : 'One-time'}` } }]
+        blocks: [{ 
+          type: 'section', 
+          text: { 
+            type: 'mrkdwn', 
+            text: `An error occurred while processing your message: ${e.message}\n\nPlease try again.` 
+          } 
+        }]
       }
     });
   }
-
-  // clear session
-  dataStore.userSessions.delete(userId);
 }
 
 async function handleSubmitPoll(body, client) {
