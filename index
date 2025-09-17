@@ -430,8 +430,38 @@ function createFormModal(type, data = {}) {
         });
       }
 
-      if (actionElements.length > 0) {
-        blocks.push({ type: 'actions', elements: actionElements });
+      // Poll display settings (only for non-open polls)
+      if (data.pollType !== 'open') {
+        blocks.push(
+          { type: 'divider' },
+          {
+            type: 'section',
+            block_id: 'poll_settings_block',
+            text: { type: 'mrkdwn', text: 'Poll display options:' },
+            accessory: {
+              type: 'checkboxes',
+              action_id: `${ACTION_PREFIX}poll_settings_checkboxes`,
+              options: [
+                {
+                  text: { type: 'mrkdwn', text: '*Show vote counts*' },
+                  value: 'show_counts'
+                },
+                {
+                  text: { type: 'mrkdwn', text: '*Anonymous voting*' },
+                  value: 'anonymous'
+                }
+              ],
+              ...(data.pollSettings && data.pollSettings.length > 0 && {
+                initial_options: data.pollSettings
+                  .filter(s => s === 'show_counts' || s === 'anonymous')
+                  .map(s => ({
+                    text: { type: 'mrkdwn', text: s === 'show_counts' ? '*Show vote counts*' : '*Anonymous voting*' },
+                    value: s
+                  }))
+              })
+            }
+          }
+        );
       }
     }
   }
@@ -491,53 +521,54 @@ function createScheduleModal(data = {}) {
     });
   }
 
-  // Timing section
+  // Timing section with plain action buttons (like the working version)
   blocks.push(
     { type: 'divider' },
-    { type: 'section', text: { type: 'mrkdwn', text: '*When to send:*' }},
+    { type: 'section', text: { type: 'mrkdwn', text: '*When to send this message:*' }},
     {
-      type: 'input',
+      type: 'actions',
       block_id: 'send_timing_block',
-      label: { type: 'plain_text', text: 'Send Timing' },
-      element: {
-        type: 'radio_buttons',
-        action_id: 'timing_radio',
-        options: [
-          { text: { type: 'plain_text', text: '🐈‍⬛ Post Now' }, value: 'now' },
-          { text: { type: 'plain_text', text: '🧶 Schedule for Later' }, value: 'schedule' }
-        ],
-        initial_option: { 
-          text: { type: 'plain_text', text: data.scheduleType === 'now' ? '🐈‍⬛ Post Now' : '🧶 Schedule for Later' }, 
-          value: data.scheduleType || 'schedule' 
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '🐈‍⬛ Post Now' },
+          style: data.scheduleType === 'now' ? 'primary' : undefined,
+          action_id: `${ACTION_PREFIX}timing_now`,
+          value: 'now'
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: '🧶 Schedule for Later' },
+          style: data.scheduleType === 'schedule' || !data.scheduleType ? 'primary' : undefined,
+          action_id: `${ACTION_PREFIX}timing_schedule`,
+          value: 'schedule'
         }
-      }
+      ]
     }
   );
 
-  // Show scheduling options if "schedule" is selected
-  if (data.scheduleType !== 'now') {
+  // Only show date/time/repeat if "schedule for later" is selected
+  if (data.scheduleType === 'schedule' || !data.scheduleType) {
     blocks.push(
+      { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: '*Schedule Details:*' }},
       {
-        type: 'section',
-        block_id: 'datetime_section',
-        text: { type: 'mrkdwn', text: '*Schedule Date & Time:*' },
-        accessory: {
-          type: 'datepicker',
-          action_id: 'date_picker',
-          initial_date: data.date || todayInEST(),
-          placeholder: { type: 'plain_text', text: 'Select date' }
-        }
-      },
-      {
-        type: 'section',
-        block_id: 'time_section',
-        text: { type: 'mrkdwn', text: 'Time (EST):' },
-        accessory: {
-          type: 'timepicker',
-          action_id: 'time_picker',
-          initial_time: data.time || '09:00',
-          placeholder: { type: 'plain_text', text: 'Select time' }
-        }
+        type: 'actions',
+        block_id: 'datetime_block',
+        elements: [
+          {
+            type: 'datepicker',
+            action_id: 'date_picker',
+            initial_date: data.date || todayInEST(),
+            placeholder: { type: 'plain_text', text: 'Select date' }
+          },
+          {
+            type: 'timepicker',
+            action_id: 'time_picker',
+            initial_time: data.time || '09:00',
+            placeholder: { type: 'plain_text', text: 'Select time' }
+          }
+        ]
       },
       {
         type: 'input',
@@ -582,6 +613,23 @@ function createScheduleModal(data = {}) {
       }
     );
   }
+
+  // Final action buttons
+  blocks.push(
+    { type: 'divider' },
+    {
+      type: 'actions',
+      elements: [
+        { type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: `${ACTION_PREFIX}nav_preview` },
+        { 
+          type: 'button', 
+          style: 'primary', 
+          text: { type: 'plain_text', text: 'Post' }, 
+          action_id: `${ACTION_PREFIX}submit_message` 
+        }
+      ]
+    }
+  );
 
   return {
     type: 'modal',
@@ -1180,6 +1228,98 @@ app.action(new RegExp(`^${ACTION_PREFIX}help_click_.+`), async ({ ack, body, cli
 });
 
 // ================================
+// DATE/TIME/REPEAT PICKER HANDLERS (CRITICAL - THESE WERE MISSING!)
+// ================================
+
+app.action('date_picker', async ({ ack, body, client }) => {
+  try {
+    await ack();
+    const userId = body.user.id;
+    const selectedDate = body.actions[0].selected_date;
+    let data = formData.get(userId) || {};
+    data.date = selectedDate;
+    formData.set(userId, data);
+    console.log(`Date selected: ${selectedDate} for user ${userId}`);
+  } catch (error) {
+    console.error('date_picker error:', error);
+  }
+});
+
+app.action('time_picker', async ({ ack, body, client }) => {
+  try {
+    await ack();
+    const userId = body.user.id;
+    const selectedTime = body.actions[0].selected_time;
+    let data = formData.get(userId) || {};
+    data.time = selectedTime;
+    formData.set(userId, data);
+    console.log(`Time selected: ${selectedTime} for user ${userId}`);
+  } catch (error) {
+    console.error('time_picker error:', error);
+  }
+});
+
+app.action('repeat_select', async ({ ack }) => {
+  try {
+    await ack();
+    // The value will be extracted when the form is submitted
+    console.log('Repeat select acknowledged');
+  } catch (error) {
+    console.error('repeat_select error:', error);
+  }
+});
+
+app.action('channel_select', async ({ ack, body, client }) => {
+  try {
+    await ack();
+    const userId = body.user.id;
+    const selectedChannel = body.actions[0].selected_conversation;
+    let data = formData.get(userId) || {};
+    data.channel = selectedChannel;
+    formData.set(userId, data);
+    console.log(`Channel selected: ${selectedChannel} for user ${userId}`);
+    
+    // Verify channel access
+    try {
+      const channelInfo = await client.conversations.info({ channel: selectedChannel });
+      console.log(`Channel verified: #${channelInfo.channel.name}`);
+    } catch (error) {
+      console.error(`Channel verification failed:`, error.data?.error);
+    }
+  } catch (error) {
+    console.error('channel_select error:', error);
+  }
+});
+
+app.action('alert_channels_select', async ({ ack, body }) => {
+  try {
+    await ack();
+    const userId = body.user.id;
+    const selectedChannels = body.actions[0].selected_conversations || [];
+    let data = formData.get(userId) || {};
+    data.alertChannels = selectedChannels;
+    formData.set(userId, data);
+    console.log(`Alert channels selected: ${selectedChannels.length} channels`);
+  } catch (error) {
+    console.error('alert_channels_select error:', error);
+  }
+});
+
+app.action('timing_radio', async ({ ack, body }) => {
+  try {
+    await ack();
+    const userId = body.user.id;
+    const selectedTiming = body.actions[0].selected_option?.value;
+    let data = formData.get(userId) || {};
+    data.scheduleType = selectedTiming;
+    formData.set(userId, data);
+    console.log(`Timing selected: ${selectedTiming} for user ${userId}`);
+  } catch (error) {
+    console.error('timing_radio error:', error);
+  }
+});
+
+// ================================
 // VIEW SUBMISSION HANDLER
 // ================================
 
@@ -1336,13 +1476,56 @@ cron.schedule('0 * * * *', () => {
   timezone: 'America/New_York'
 });
 
-// Global error handler
-app.error(async (error) => {
-  console.error('Global error:', error);
-  
-  // Log specific error types
-  if (error.code === 'slack_webapi_platform_error') {
-    console.error('Platform error details:', error.data);
+// Back navigation handlers from preview to form
+['capacity', 'poll', 'help', 'custom'].forEach(type => {
+  app.action(`${ACTION_PREFIX}back_to_${type}`, async ({ ack, body, client }) => {
+    try {
+      await ack();
+      const userId = body.user.id;
+      const data = formData.get(userId) || { type };
+      
+      await client.views.update({
+        view_id: body.view.id,
+        view: createFormModal(type, data)
+      });
+    } catch (error) {
+      console.error(`back_to_${type} error:`, error);
+    }
+  });
+});
+
+// Add reset template handlers (if implementing template reset functionality)
+app.action(`${ACTION_PREFIX}reset_template_capacity`, async ({ ack, body, client }) => {
+  try {
+    await ack();
+    const userId = body.user.id;
+    let data = formData.get(userId) || {};
+    data.text = templates.capacity;
+    formData.set(userId, data);
+    
+    await client.views.update({
+      view_id: body.view.id,
+      view: createFormModal('capacity', data)
+    });
+  } catch (error) {
+    console.error('reset_template_capacity error:', error);
+  }
+});
+
+app.action(`${ACTION_PREFIX}reset_template_help`, async ({ ack, body, client }) => {
+  try {
+    await ack();
+    const userId = body.user.id;
+    let data = formData.get(userId) || {};
+    data.text = templates.help;
+    formData.set(userId, data);
+    
+    await client.views.update({
+      view_id: body.view.id,
+      view: createFormModal('help', data)
+    });
+  } catch (error) {
+    console.error('reset_template_help error:', error);
   }
 });
 
