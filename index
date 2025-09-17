@@ -559,14 +559,14 @@ function createScheduleModal(data = {}) {
           {
             type: 'datepicker',
             action_id: 'date_picker',
-            initial_date: data.date || todayInEST(),
+            ...(data.date && { initial_date: data.date }),
             placeholder: { type: 'plain_text', text: 'Select date' }
           },
           {
             type: 'timepicker',
             action_id: 'time_picker',
-            initial_time: data.time || '09:00',
-            placeholder: { type: 'plain_text', text: 'Select time' }
+            ...(data.time && { initial_time: data.time }),
+            placeholder: { type: 'plain_text', text: 'Select time (EST)' }
           }
         ]
       },
@@ -577,13 +577,7 @@ function createScheduleModal(data = {}) {
         element: {
           type: 'static_select',
           action_id: 'repeat_select',
-          initial_option: data.repeat === 'daily' ? 
-            { text: { type: 'plain_text', text: 'Daily' }, value: 'daily' } :
-            data.repeat === 'weekly' ? 
-            { text: { type: 'plain_text', text: 'Weekly' }, value: 'weekly' } :
-            data.repeat === 'monthly' ? 
-            { text: { type: 'plain_text', text: 'Monthly' }, value: 'monthly' } :
-            { text: { type: 'plain_text', text: 'None (One-time)' }, value: 'none' },
+          initial_option: { text: { type: 'plain_text', text: 'None (One-time)' }, value: 'none' },
           options: [
             { text: { type: 'plain_text', text: 'None (One-time)' }, value: 'none' },
             { text: { type: 'plain_text', text: 'Daily' }, value: 'daily' },
@@ -899,20 +893,19 @@ app.action(`${ACTION_PREFIX}nav_scheduled`, async ({ ack, body, client }) => {
       // Reset data for new message type
       data = {
         type: messageType,
-        title: data.title || '',
-        text: data.text || '',
+        title: '',
+        text: '',
         scheduleType: 'schedule',
-        date: todayInEST(),
-        time: '09:00',
+        // Don't set default date/time - let user choose
         repeat: 'none'
       };
 
       // Set type-specific defaults
       if (messageType === 'help') {
-        data.alertChannels = data.alertChannels || [];
+        data.alertChannels = [];
       } else if (messageType === 'poll') {
-        data.pollType = data.pollType || 'single';
-        data.pollOptions = data.pollOptions || 'Option 1\nOption 2';
+        data.pollType = 'single';
+        data.pollOptions = 'Option 1\nOption 2';
       }
 
       formData.set(userId, data);
@@ -1228,20 +1221,23 @@ app.action(new RegExp(`^${ACTION_PREFIX}help_click_.+`), async ({ ack, body, cli
 });
 
 // ================================
-// DATE/TIME/REPEAT PICKER HANDLERS (CRITICAL - THESE WERE MISSING!)
-// ================================
-
+// DATE/TIME/REPEAT PICKER HANDLERS - Using correct Slack SDK types
 app.action('date_picker', async ({ ack, body, client }) => {
   try {
     await ack();
     const userId = body.user.id;
-    const selectedDate = body.actions[0].selected_date;
-    let data = formData.get(userId) || {};
-    data.date = selectedDate;
-    formData.set(userId, data);
-    console.log(`Date selected: ${selectedDate} for user ${userId}`);
+    // According to Slack SDK, Datepicker action returns selected_date as string
+    const action = body.actions[0];
+    if (action.type === 'datepicker' && action.selected_date) {
+      let data = formData.get(userId) || {};
+      data.date = action.selected_date; // Format: YYYY-MM-DD
+      data.scheduleType = 'schedule';
+      formData.set(userId, data);
+      formTimestamps.set(userId, Date.now());
+      console.log(`✅ Date selected: ${action.selected_date} for user ${userId}`);
+    }
   } catch (error) {
-    console.error('date_picker error:', error);
+    console.error('❌ date_picker error:', error);
   }
 });
 
@@ -1249,23 +1245,36 @@ app.action('time_picker', async ({ ack, body, client }) => {
   try {
     await ack();
     const userId = body.user.id;
-    const selectedTime = body.actions[0].selected_time;
-    let data = formData.get(userId) || {};
-    data.time = selectedTime;
-    formData.set(userId, data);
-    console.log(`Time selected: ${selectedTime} for user ${userId}`);
+    // According to Slack SDK, Timepicker action returns selected_time as string
+    const action = body.actions[0];
+    if (action.type === 'timepicker' && action.selected_time) {
+      let data = formData.get(userId) || {};
+      data.time = action.selected_time; // Format: HH:mm
+      data.scheduleType = 'schedule';
+      formData.set(userId, data);
+      formTimestamps.set(userId, Date.now());
+      console.log(`✅ Time selected: ${action.selected_time} for user ${userId}`);
+    }
   } catch (error) {
-    console.error('time_picker error:', error);
+    console.error('❌ time_picker error:', error);
   }
 });
 
-app.action('repeat_select', async ({ ack }) => {
+app.action('repeat_select', async ({ ack, body, client }) => {
   try {
     await ack();
-    // The value will be extracted when the form is submitted
-    console.log('Repeat select acknowledged');
+    const userId = body.user.id;
+    // StaticSelect returns selected_option
+    const action = body.actions[0];
+    if (action.type === 'static_select' && action.selected_option) {
+      let data = formData.get(userId) || {};
+      data.repeat = action.selected_option.value;
+      formData.set(userId, data);
+      formTimestamps.set(userId, Date.now());
+      console.log(`✅ Repeat selected: ${action.selected_option.value} for user ${userId}`);
+    }
   } catch (error) {
-    console.error('repeat_select error:', error);
+    console.error('❌ repeat_select error:', error);
   }
 });
 
@@ -1273,35 +1282,43 @@ app.action('channel_select', async ({ ack, body, client }) => {
   try {
     await ack();
     const userId = body.user.id;
-    const selectedChannel = body.actions[0].selected_conversation;
-    let data = formData.get(userId) || {};
-    data.channel = selectedChannel;
-    formData.set(userId, data);
-    console.log(`Channel selected: ${selectedChannel} for user ${userId}`);
-    
-    // Verify channel access
-    try {
-      const channelInfo = await client.conversations.info({ channel: selectedChannel });
-      console.log(`Channel verified: #${channelInfo.channel.name}`);
-    } catch (error) {
-      console.error(`Channel verification failed:`, error.data?.error);
+    // ConversationsSelect returns selected_conversation as string
+    const action = body.actions[0];
+    if (action.type === 'conversations_select' && action.selected_conversation) {
+      let data = formData.get(userId) || {};
+      data.channel = action.selected_conversation;
+      formData.set(userId, data);
+      formTimestamps.set(userId, Date.now());
+      console.log(`✅ Channel selected: ${action.selected_conversation} for user ${userId}`);
+      
+      // Verify channel access
+      try {
+        const channelInfo = await client.conversations.info({ channel: action.selected_conversation });
+        console.log(`✅ Channel verified: #${channelInfo.channel.name}`);
+      } catch (error) {
+        console.error(`⚠️ Channel verification failed:`, error.data?.error);
+      }
     }
   } catch (error) {
-    console.error('channel_select error:', error);
+    console.error('❌ channel_select error:', error);
   }
 });
 
-app.action('alert_channels_select', async ({ ack, body }) => {
+app.action('alert_channels_select', async ({ ack, body, client }) => {
   try {
     await ack();
     const userId = body.user.id;
-    const selectedChannels = body.actions[0].selected_conversations || [];
-    let data = formData.get(userId) || {};
-    data.alertChannels = selectedChannels;
-    formData.set(userId, data);
-    console.log(`Alert channels selected: ${selectedChannels.length} channels`);
+    // MultiConversationsSelect returns selected_conversations as string[]
+    const action = body.actions[0];
+    if (action.type === 'multi_conversations_select' && action.selected_conversations) {
+      let data = formData.get(userId) || {};
+      data.alertChannels = action.selected_conversations;
+      formData.set(userId, data);
+      formTimestamps.set(userId, Date.now());
+      console.log(`✅ Alert channels selected: ${action.selected_conversations.length} channels`);
+    }
   } catch (error) {
-    console.error('alert_channels_select error:', error);
+    console.error('❌ alert_channels_select error:', error);
   }
 });
 
@@ -1336,14 +1353,34 @@ app.view(`${ACTION_PREFIX}schedule_submit`, async ({ ack, body, view, client }) 
       data.alertChannels = values.alert_channels_block?.alert_channels_select?.selected_conversations || [];
     }
 
-    const timingValue = values.send_timing_block?.timing_radio?.selected_option?.value;
-    data.scheduleType = timingValue || 'schedule';
-
-    if (data.scheduleType === 'schedule') {
-      data.date = values.datetime_section?.date_picker?.selected_date || todayInEST();
-      data.time = values.time_section?.time_picker?.selected_time || '09:00';
-      data.repeat = values.repeat_block?.repeat_select?.selected_option?.value || 'none';
+    // CRITICAL FIX: Don't use radio value, check for actual date/time fields
+    // If date/time fields exist, we're scheduling
+    if (values.datetime_block?.date_picker?.selected_date) {
+      data.scheduleType = 'schedule';
+      data.date = values.datetime_block.date_picker.selected_date;
     }
+    
+    if (values.datetime_block?.time_picker?.selected_time) {
+      data.scheduleType = 'schedule';
+      data.time = values.datetime_block.time_picker.selected_time;
+    }
+    
+    if (values.repeat_block?.repeat_select?.selected_option?.value) {
+      data.repeat = values.repeat_block.repeat_select.selected_option.value;
+    }
+    
+    // If no date/time was set, default to 'now'
+    if (!data.date && !data.time) {
+      data.scheduleType = 'now';
+    }
+    
+    console.log('View submission data extracted:', {
+      channel: data.channel,
+      scheduleType: data.scheduleType,
+      date: data.date,
+      time: data.time,
+      repeat: data.repeat
+    });
 
     // Validation
     const errors = {};
@@ -1408,7 +1445,28 @@ app.view(`${ACTION_PREFIX}schedule_submit`, async ({ ack, body, view, client }) 
         });
       }
     } else {
-      // Schedule for later
+      // Schedule for later - ensure we have date/time
+      if (!data.date || !data.time) {
+        await ack({
+          response_action: 'errors',
+          errors: {
+            datetime_block: 'Please select both a date and time for scheduling'
+          }
+        });
+        return;
+      }
+      
+      // Validate not in the past
+      if (data.repeat === 'none' && isDateTimeInPast(data.date, data.time)) {
+        await ack({
+          response_action: 'errors',
+          errors: {
+            datetime_block: 'Cannot schedule messages in the past. Please select a future date and time.'
+          }
+        });
+        return;
+      }
+      
       scheduledMessages.push(data);
       saveMessages();
       scheduleJob(data);
