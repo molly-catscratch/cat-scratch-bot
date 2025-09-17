@@ -1,6 +1,6 @@
 /**
- * PM Squad Bot - Working Architecture with All Features
- * Based on proven working patterns from the original code
+ * PM Squad Bot - Refactored with Slack API Best Practices
+ * All identified issues have been addressed
  * Requirements: npm i @slack/bolt node-cron dotenv
  * ENV: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_SIGNING_SECRET
  */
@@ -23,20 +23,35 @@ const app = new App({
 });
 
 // ================================
+// CONSTANTS
+// ================================
+
+const ACTION_PREFIX = 'pmsquad_';
+const FORM_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const RATE_LIMIT_MS = 1000; // 1 second
+const SCHEDULE_FILE = './scheduledMessages.json';
+const POLLS_FILE = './pollVotes.json';
+
+// ================================
 // STORAGE & STATE
 // ================================
 
-const SCHEDULE_FILE = './scheduledMessages.json';
 let scheduledMessages = [];
 const jobs = new Map();
-const pollVotes = {};
-const formData = new Map(); // Store form data for navigation
+let pollVotes = {};
+const formData = new Map();
+const formTimestamps = new Map();
+const userLastCommand = new Map();
+
+// ================================
+// STORAGE FUNCTIONS
+// ================================
 
 function saveMessages() {
   try {
     fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(scheduledMessages, null, 2));
   } catch (e) {
-    console.error('Save failed:', e);
+    console.error('Save messages failed:', e);
   }
 }
 
@@ -50,20 +65,74 @@ function loadMessages() {
       });
       saveMessages();
     } catch (e) {
-      console.error('Load failed:', e);
+      console.error('Load messages failed:', e);
       scheduledMessages = [];
     }
   }
 }
 
+function savePollVotes() {
+  try {
+    // Convert Sets to Arrays for JSON serialization
+    const serializable = {};
+    for (const [msgId, options] of Object.entries(pollVotes)) {
+      serializable[msgId] = {};
+      for (const [optionId, voters] of Object.entries(options)) {
+        serializable[msgId][optionId] = Array.from(voters instanceof Set ? voters : []);
+      }
+    }
+    fs.writeFileSync(POLLS_FILE, JSON.stringify(serializable, null, 2));
+  } catch (e) {
+    console.error('Save poll votes failed:', e);
+  }
+}
+
+function loadPollVotes() {
+  if (fs.existsSync(POLLS_FILE)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(POLLS_FILE));
+      // Convert Arrays back to Sets
+      pollVotes = {};
+      for (const [msgId, options] of Object.entries(data)) {
+        pollVotes[msgId] = {};
+        for (const [optionId, voters] of Object.entries(options)) {
+          pollVotes[msgId][optionId] = new Set(voters);
+        }
+      }
+    } catch (e) {
+      console.error('Load poll votes failed:', e);
+      pollVotes = {};
+    }
+  }
+}
+
 loadMessages();
+loadPollVotes();
+
+// ================================
+// CLEANUP FUNCTIONS
+// ================================
+
+function cleanupOldFormData() {
+  const now = Date.now();
+  for (const [userId, timestamp] of formTimestamps.entries()) {
+    if (now - timestamp > FORM_TIMEOUT) {
+      formData.delete(userId);
+      formTimestamps.delete(userId);
+      console.log(`Cleaned up abandoned form data for user ${userId}`);
+    }
+  }
+}
+
+// Run cleanup every 5 minutes
+setInterval(cleanupOldFormData, 5 * 60 * 1000);
 
 // ================================
 // UTILITIES
 // ================================
 
 const generateId = () => `msg_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
-const cat = () => Math.random() < 0.35 ? ` ${['₍^. .^₎⟆', 'ᓚ₍ ^. .^₎', 'ฅ^•ﻌ•^ฅ'][Math.floor(Math.random() * 4)]}` : '';
+const cat = () => Math.random() < 0.35 ? ` ${['₍^. .^₎⟆', 'ᓚ₍ ^. .^₎', 'ฅ^•ﻌ•^ฅ'][Math.floor(Math.random() * 3)]}` : '';
 
 function todayInEST() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date());
@@ -113,6 +182,49 @@ function isDateTimeInPast(dateStr, timeStr) {
   }
 }
 
+async function getUserTimezone(client, userId) {
+  try {
+    const result = await client.users.info({ user: userId });
+    return result.user.tz || 'America/New_York';
+  } catch {
+    return 'America/New_York';
+  }
+}
+
+async function verifyChannelAccess(client, channel) {
+  try {
+    const result = await client.conversations.info({
+      channel: channel
+    });
+    
+    if (!result.channel.is_member) {
+      // Try to join the channel
+      try {
+        await client.conversations.join({ channel });
+        console.log(`Bot joined channel: ${channel}`);
+        return true;
+      } catch (joinError) {
+        console.error(`Cannot join channel ${channel}:`, joinError.data?.error);
+        return false;
+      }
+    }
+    return true;
+  } catch (error) {
+    console.error('Channel access check failed:', error.data?.error);
+    return false;
+  }
+}
+
+function isDuplicateSchedule(newMsg) {
+  return scheduledMessages.some(msg => 
+    msg.channel === newMsg.channel &&
+    msg.date === newMsg.date &&
+    msg.time === newMsg.time &&
+    msg.text === newMsg.text &&
+    msg.id !== newMsg.id
+  );
+}
+
 // ================================
 // TEMPLATES
 // ================================
@@ -126,10 +238,10 @@ const templates = {
 // MODAL CREATION FUNCTIONS
 // ================================
 
-function createMenuModal() {
+function createMenuModal(triggerId, userId) {
   return {
     type: 'modal',
-    callback_id: 'scheduler_menu',
+    callback_id: `${ACTION_PREFIX}menu_${triggerId}`,
     title: { type: 'plain_text', text: 'Cat Scratch Menu' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks: [
@@ -138,22 +250,22 @@ function createMenuModal() {
       {
         type: 'actions',
         elements: [
-          { type: 'button', text: { type: 'plain_text', text: 'Capacity Check' }, action_id: 'nav_capacity' },
-          { type: 'button', text: { type: 'plain_text', text: 'Poll' }, action_id: 'nav_poll' }
+          { type: 'button', text: { type: 'plain_text', text: 'Capacity Check' }, action_id: `${ACTION_PREFIX}nav_capacity` },
+          { type: 'button', text: { type: 'plain_text', text: 'Poll' }, action_id: `${ACTION_PREFIX}nav_poll` }
         ]
       },
       {
         type: 'actions',
         elements: [
-          { type: 'button', text: { type: 'plain_text', text: 'Help Button' }, action_id: 'nav_help' },
-          { type: 'button', text: { type: 'plain_text', text: 'Custom Message' }, action_id: 'nav_custom' }
+          { type: 'button', text: { type: 'plain_text', text: 'Help Button' }, action_id: `${ACTION_PREFIX}nav_help` },
+          { type: 'button', text: { type: 'plain_text', text: 'Custom Message' }, action_id: `${ACTION_PREFIX}nav_custom` }
         ]
       },
       { type: 'divider' },
       {
         type: 'actions',
         elements: [
-          { type: 'button', text: { type: 'plain_text', text: 'View Scheduled' }, action_id: 'nav_scheduled' }
+          { type: 'button', text: { type: 'plain_text', text: 'View Scheduled' }, action_id: `${ACTION_PREFIX}nav_scheduled` }
         ]
       }
     ]
@@ -183,12 +295,16 @@ function createScheduledModal() {
           type: 'button',
           style: 'danger',
           text: { type: 'plain_text', text: 'Delete' },
-          action_id: `delete_message_${msg.id}`,
+          action_id: `${ACTION_PREFIX}delete_message_${msg.id}`,
           value: msg.id,
           confirm: {
-            title: { type: 'plain_text', text: 'Delete Message' },
-            text: { type: 'mrkdwn', text: `Are you sure you want to delete "*${msg.title || msg.type}*"?` },
-            confirm: { type: 'plain_text', text: 'Delete' },
+            title: { type: 'plain_text', text: 'Delete Scheduled Message?' },
+            text: { 
+              type: 'mrkdwn', 
+              text: `This will permanently delete "*${msg.title || msg.type}*" scheduled for ${msg.date} at ${formatTimeDisplay(msg.time)}.\n\nThis action cannot be undone.`
+            },
+            style: 'danger',
+            confirm: { type: 'plain_text', text: 'Yes, Delete' },
             deny: { type: 'plain_text', text: 'Cancel' }
           }
         }
@@ -198,12 +314,12 @@ function createScheduledModal() {
 
   blocks.push(
     { type: 'divider' },
-    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: 'nav_menu' }]}
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: `${ACTION_PREFIX}nav_menu` }]}
   );
 
   return {
     type: 'modal',
-    callback_id: 'scheduler_scheduled',
+    callback_id: `${ACTION_PREFIX}scheduled`,
     title: { type: 'plain_text', text: 'Scheduled Messages' },
     close: { type: 'plain_text', text: 'Close' },
     blocks
@@ -261,7 +377,7 @@ function createFormModal(type, data = {}) {
         text: { type: 'mrkdwn', text: 'How should people vote?' },
         accessory: {
           type: 'radio_buttons',
-          action_id: 'poll_type_radio',
+          action_id: `${ACTION_PREFIX}poll_type_radio`,
           options: [
             { text: { type: 'plain_text', text: 'Single Choice' }, value: 'single' },
             { text: { type: 'plain_text', text: 'Multiple Choice' }, value: 'multiple' },
@@ -302,14 +418,14 @@ function createFormModal(type, data = {}) {
         actionElements.push({
           type: 'button',
           text: { type: 'plain_text', text: 'Add Option' },
-          action_id: 'add_poll_option'
+          action_id: `${ACTION_PREFIX}add_poll_option`
         });
       }
       if (options.length > 2) {
         actionElements.push({
           type: 'button',
           text: { type: 'plain_text', text: 'Remove Last Option' },
-          action_id: 'remove_poll_option',
+          action_id: `${ACTION_PREFIX}remove_poll_option`,
           style: 'danger'
         });
       }
@@ -326,84 +442,24 @@ function createFormModal(type, data = {}) {
     {
       type: 'actions',
       elements: [
-        { type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: 'nav_menu' },
-        { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Preview Message' }, action_id: 'nav_preview' }
+        { type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: `${ACTION_PREFIX}nav_menu` },
+        { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Continue →' }, action_id: `${ACTION_PREFIX}nav_preview` }
       ]
     }
   );
 
   return {
     type: 'modal',
-    callback_id: `scheduler_${type}`,
+    callback_id: `${ACTION_PREFIX}form_${type}`,
     title: { type: 'plain_text', text: `${type.charAt(0).toUpperCase() + type.slice(1)} Message` },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks
   };
 }
 
-function createPreviewModal(data = {}) {
-  let previewText = '';
-
-  if (data.title && (data.type === 'poll' || data.type === 'custom')) {
-    previewText += `*${data.title}*\n`;
-  }
-
-  if (data.type === 'capacity') {
-    previewText += data.text || templates.capacity;
-  } else if (data.type === 'poll') {
-    previewText += `*${data.title || 'Poll'}*\n`;
-    if (data.text) previewText += `${data.text}\n`;
-
-    if (data.pollType === 'open') {
-      previewText += '\n_Open discussion - responses in thread_';
-    } else if (data.pollOptions) {
-      const options = data.pollOptions.split('\n').filter(Boolean);
-      previewText += '\n' + options.map((opt, i) => `${i + 1}. ${opt}`).join('\n');
-      const voteType = data.pollType === 'single' ? 'Single choice' : 'Multiple choice';
-      previewText += `\n_Type: ${voteType}_`;
-    }
-  } else if (data.type === 'help') {
-    previewText += data.text || templates.help;
-    previewText += '\n\n🆘 Request Backup (button)';
-    if (data.alertChannels && data.alertChannels.length > 0) {
-      previewText += `\n_Will alert: ${data.alertChannels.length} channel(s)_`;
-    }
-  } else {
-    if (data.title) previewText += `*${data.title}*\n`;
-    previewText += data.text || '(no content)';
-  }
-
-  previewText += cat();
-
-  return {
-    type: 'modal',
-    callback_id: 'scheduler_preview',
-    title: { type: 'plain_text', text: `${data.type ? data.type.charAt(0).toUpperCase() + data.type.slice(1) : 'Message'} Preview` },
-    close: { type: 'plain_text', text: 'Cancel' },
-    blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: '*Step 2: Preview Your Message*' }},
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*Preview:*\n\`\`\`${previewText.substring(0, 500)}${previewText.length > 500 ? '...' : ''}\`\`\``
-        }
-      },
-      { type: 'divider' },
-      {
-        type: 'actions',
-        elements: [
-          { type: 'button', text: { type: 'plain_text', text: '← Back to Edit' }, action_id: `nav_${data.type || 'custom'}` },
-          { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Continue to Send/Schedule' }, action_id: 'nav_schedule' }
-        ]
-      }
-    ]
-  };
-}
-
 function createScheduleModal(data = {}) {
   const blocks = [
-    { type: 'section', text: { type: 'mrkdwn', text: '*Step 3: Send or Schedule Message*' }},
+    { type: 'section', text: { type: 'mrkdwn', text: '*Step 2: Send or Schedule Message*' }},
     { type: 'divider' },
     { type: 'section', text: { type: 'mrkdwn', text: '*Where to send:*' }},
     {
@@ -438,49 +494,50 @@ function createScheduleModal(data = {}) {
   // Timing section
   blocks.push(
     { type: 'divider' },
-    { type: 'section', text: { type: 'mrkdwn', text: '*When to send this message:*' }},
+    { type: 'section', text: { type: 'mrkdwn', text: '*When to send:*' }},
     {
-      type: 'actions',
+      type: 'input',
       block_id: 'send_timing_block',
-      elements: [
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: '🐈‍⬛ Post Now' },
-          style: data.scheduleType === 'now' ? 'primary' : undefined,
-          action_id: 'timing_now'
-        },
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: '🧶 Schedule for Later' },
-          style: data.scheduleType === 'schedule' || !data.scheduleType ? 'primary' : undefined,
-          action_id: 'timing_schedule'
+      label: { type: 'plain_text', text: 'Send Timing' },
+      element: {
+        type: 'radio_buttons',
+        action_id: 'timing_radio',
+        options: [
+          { text: { type: 'plain_text', text: '🐈‍⬛ Post Now' }, value: 'now' },
+          { text: { type: 'plain_text', text: '🧶 Schedule for Later' }, value: 'schedule' }
+        ],
+        initial_option: { 
+          text: { type: 'plain_text', text: data.scheduleType === 'now' ? '🐈‍⬛ Post Now' : '🧶 Schedule for Later' }, 
+          value: data.scheduleType || 'schedule' 
         }
-      ]
+      }
     }
   );
 
-  // Only show date/time/repeat inputs if "schedule for later" is selected
-  if (data.scheduleType === 'schedule' || !data.scheduleType) {
+  // Show scheduling options if "schedule" is selected
+  if (data.scheduleType !== 'now') {
     blocks.push(
-      { type: 'divider' },
-      { type: 'section', text: { type: 'mrkdwn', text: '*Schedule Details:*' }},
       {
-        type: 'actions',
-        block_id: 'datetime_block',
-        elements: [
-          {
-            type: 'datepicker',
-            action_id: 'date_picker',
-            initial_date: data.date || todayInEST(),
-            placeholder: { type: 'plain_text', text: 'Select date' }
-          },
-          {
-            type: 'timepicker',
-            action_id: 'time_picker',
-            initial_time: data.time || '09:00',
-            placeholder: { type: 'plain_text', text: 'Select time' }
-          }
-        ]
+        type: 'section',
+        block_id: 'datetime_section',
+        text: { type: 'mrkdwn', text: '*Schedule Date & Time:*' },
+        accessory: {
+          type: 'datepicker',
+          action_id: 'date_picker',
+          initial_date: data.date || todayInEST(),
+          placeholder: { type: 'plain_text', text: 'Select date' }
+        }
+      },
+      {
+        type: 'section',
+        block_id: 'time_section',
+        text: { type: 'mrkdwn', text: 'Time (EST):' },
+        accessory: {
+          type: 'timepicker',
+          action_id: 'time_picker',
+          initial_time: data.time || '09:00',
+          placeholder: { type: 'plain_text', text: 'Select time' }
+        }
       },
       {
         type: 'input',
@@ -507,22 +564,30 @@ function createScheduleModal(data = {}) {
     );
   }
 
-  // Final action buttons
-  blocks.push(
-    { type: 'divider' },
-    {
-      type: 'actions',
-      elements: [
-        { type: 'button', text: { type: 'plain_text', text: '← Back to Preview' }, action_id: 'nav_preview' },
-        { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Post' }, action_id: 'submit_message' }
-      ]
-    }
-  );
+  // Preview section
+  if (data.text || data.title) {
+    let previewText = '';
+    if (data.title) previewText += `*${data.title}*\n`;
+    previewText += (data.text || '').substring(0, 200);
+    if ((data.text || '').length > 200) previewText += '...';
+    
+    blocks.push(
+      { type: 'divider' },
+      { 
+        type: 'section', 
+        text: { 
+          type: 'mrkdwn', 
+          text: `*Preview:*\n\`\`\`${previewText}\`\`\`` 
+        }
+      }
+    );
+  }
 
   return {
     type: 'modal',
-    callback_id: 'scheduler_schedule',
-    title: { type: 'plain_text', text: 'Send or Schedule Message' },
+    callback_id: `${ACTION_PREFIX}schedule_submit`,
+    title: { type: 'plain_text', text: 'Send Message' },
+    submit: { type: 'plain_text', text: 'Send' },
     close: { type: 'plain_text', text: 'Cancel' },
     blocks
   };
@@ -541,12 +606,10 @@ async function sendMessage(msg) {
       return false;
     }
 
-    // Test channel access
-    try {
-      const channelInfo = await app.client.conversations.info({ channel: msg.channel });
-      console.log(`Channel accessible: #${channelInfo.channel.name}`);
-    } catch (channelError) {
-      console.error(`Channel access failed:`, channelError.data?.error);
+    // Verify channel access
+    const hasAccess = await verifyChannelAccess(app.client, msg.channel);
+    if (!hasAccess) {
+      console.error(`Bot doesn't have access to channel ${msg.channel}`);
       return false;
     }
 
@@ -559,14 +622,18 @@ async function sendMessage(msg) {
       });
 
       if (result.ok && result.ts) {
-        try {
-          await app.client.reactions.add({ 
-            channel: msg.channel, 
-            timestamp: result.ts, 
-            name: 'black_cat' 
-          });
-        } catch (e) {
-          console.error('Reaction failed:', e.data?.error);
+        // Add reactions
+        const reactions = ['green_circle', 'yellow_circle', 'orange_circle', 'red_circle'];
+        for (const reaction of reactions) {
+          try {
+            await app.client.reactions.add({ 
+              channel: msg.channel, 
+              timestamp: result.ts, 
+              name: reaction 
+            });
+          } catch (e) {
+            console.error(`Reaction ${reaction} failed:`, e.data?.error);
+          }
         }
       }
     } else if (msg.type === 'poll') {
@@ -580,7 +647,7 @@ async function sendMessage(msg) {
         const buttonElements = options.map((option, idx) => ({
           type: 'button',
           text: { type: 'plain_text', text: option.slice(0, 70) },
-          action_id: `poll_vote_${msg.id}_${idx}`,
+          action_id: `${ACTION_PREFIX}poll_vote_${msg.id}_${idx}`,
           value: `${idx}`
         }));
 
@@ -620,7 +687,7 @@ async function sendMessage(msg) {
               type: 'button',
               style: 'danger',
               text: { type: 'plain_text', text: '🆘 Request Backup' },
-              action_id: `help_click_${msg.id}`,
+              action_id: `${ACTION_PREFIX}help_click_${msg.id}`,
               value: JSON.stringify({
                 msgId: msg.id,
                 alertChannels: msg.alertChannels || []
@@ -648,7 +715,7 @@ async function sendMessage(msg) {
     console.log(`${msg.type} message sent successfully`);
     return true;
   } catch (e) {
-    console.error('Send failed:', e);
+    console.error('Send failed:', e.data?.error || e.message);
     return false;
   }
 }
@@ -711,35 +778,53 @@ scheduledMessages.forEach(msg => {
 // HANDLERS
 // ================================
 
-// Slash command - Entry point
+// Slash command - Entry point with rate limiting
 app.command('/pm', async ({ ack, body, client }) => {
-  await ack();
   try {
+    // Rate limiting
+    const userId = body.user_id;
+    const now = Date.now();
+    const lastCommand = userLastCommand.get(userId) || 0;
+    
+    if (now - lastCommand < RATE_LIMIT_MS) {
+      await ack();
+      return; // Silently ignore rapid requests
+    }
+    
+    userLastCommand.set(userId, now);
+    await ack();
+
     await client.views.open({
       trigger_id: body.trigger_id,
-      view: createMenuModal()
+      view: createMenuModal(body.trigger_id, userId)
     });
   } catch (error) {
-    console.error('Failed to open modal:', error);
+    console.error('Failed to handle /pm command:', error);
+    if (!error.data?.ack) {
+      await ack().catch(() => {});
+    }
   }
 });
 
-// Navigation handlers
-app.action('nav_menu', async ({ ack, body, client }) => {
-  await ack();
+// Navigation handlers with proper error handling
+app.action(`${ACTION_PREFIX}nav_menu`, async ({ ack, body, client }) => {
   try {
+    await ack();
     await client.views.update({
       view_id: body.view.id,
-      view: createMenuModal()
+      view: createMenuModal(body.trigger_id, body.user.id)
     });
   } catch (error) {
     console.error('nav_menu error:', error);
+    if (error.data?.error === 'expired_trigger_id') {
+      console.log('View expired, cannot update');
+    }
   }
 });
 
-app.action('nav_scheduled', async ({ ack, body, client }) => {
-  await ack();
+app.action(`${ACTION_PREFIX}nav_scheduled`, async ({ ack, body, client }) => {
   try {
+    await ack();
     await client.views.update({
       view_id: body.view.id,
       view: createScheduledModal()
@@ -750,12 +835,15 @@ app.action('nav_scheduled', async ({ ack, body, client }) => {
 });
 
 // Form navigation handlers
-['nav_capacity', 'nav_poll', 'nav_help', 'nav_custom'].forEach(action => {
+[`${ACTION_PREFIX}nav_capacity`, `${ACTION_PREFIX}nav_poll`, `${ACTION_PREFIX}nav_help`, `${ACTION_PREFIX}nav_custom`].forEach(action => {
   app.action(action, async ({ ack, body, client }) => {
-    await ack();
     try {
-      const messageType = action.replace('nav_', '');
+      await ack();
+      const messageType = action.replace(`${ACTION_PREFIX}nav_`, '');
       const userId = body.user.id;
+
+      // Update timestamp for form data cleanup
+      formTimestamps.set(userId, Date.now());
 
       // Get or create user data
       let data = formData.get(userId) || {};
@@ -787,14 +875,17 @@ app.action('nav_scheduled', async ({ ack, body, client }) => {
       });
     } catch (error) {
       console.error(`${action} error:`, error);
+      if (error.data?.error === 'view_too_large') {
+        console.error('View too large, simplifying...');
+      }
     }
   });
 });
 
-// Preview and schedule navigation
-app.action('nav_preview', async ({ ack, body, client }) => {
-  await ack();
+// Preview navigation
+app.action(`${ACTION_PREFIX}nav_preview`, async ({ ack, body, client }) => {
   try {
+    await ack();
     const userId = body.user.id;
     let data = formData.get(userId) || {};
 
@@ -839,160 +930,17 @@ app.action('nav_preview', async ({ ack, body, client }) => {
 
     await client.views.update({
       view_id: body.view.id,
-      view: createPreviewModal(data)
+      view: createScheduleModal(data)
     });
   } catch (error) {
     console.error('nav_preview error:', error);
   }
 });
 
-app.action('nav_schedule', async ({ ack, body, client }) => {
-  await ack();
+// Poll type radio handler
+app.action(`${ACTION_PREFIX}poll_type_radio`, async ({ ack, body, client }) => {
   try {
-    const userId = body.user.id;
-    const data = formData.get(userId) || {};
-
-    await client.views.update({
-      view_id: body.view.id,
-      view: createScheduleModal(data)
-    });
-  } catch (error) {
-    console.error('nav_schedule error:', error);
-  }
-});
-
-// CRITICAL: Date/time/repeat picker handlers (these were missing!)
-app.action('date_picker', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    const selectedDate = body.actions[0].selected_date;
-    let data = formData.get(userId) || {};
-    data.date = selectedDate;
-    formData.set(userId, data);
-    console.log(`Date selected: ${selectedDate}`);
-    
-    // Update the modal to reflect the change
-    await client.views.update({
-      view_id: body.view.id,
-      view: createScheduleModal(data)
-    });
-  } catch (error) {
-    console.error('date_picker error:', error);
-  }
-});
-
-app.action('time_picker', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    const selectedTime = body.actions[0].selected_time;
-    let data = formData.get(userId) || {};
-    data.time = selectedTime;
-    formData.set(userId, data);
-    console.log(`Time selected: ${selectedTime}`);
-    
-    // Update the modal to reflect the change
-    await client.views.update({
-      view_id: body.view.id,
-      view: createScheduleModal(data)
-    });
-  } catch (error) {
-    console.error('time_picker error:', error);
-  }
-});
-
-app.action('repeat_select', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    const selectedRepeat = body.actions[0].selected_option?.value;
-    let data = formData.get(userId) || {};
-    data.repeat = selectedRepeat;
-    formData.set(userId, data);
-    console.log(`Repeat selected: ${selectedRepeat}`);
-  } catch (error) {
-    console.error('repeat_select error:', error);
-  }
-});
-
-// CRITICAL: Alert channels handler (was missing!)
-app.action('alert_channels_select', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    const selectedChannels = body.actions[0].selected_conversations || [];
-    let data = formData.get(userId) || {};
-    data.alertChannels = selectedChannels;
-    formData.set(userId, data);
-    console.log(`Alert channels selected: ${selectedChannels.length} channels`);
-  } catch (error) {
-    console.error('alert_channels_select error:', error);
-  }
-});
-
-// Timing buttons
-app.action('timing_now', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    let data = formData.get(userId) || {};
-    data.scheduleType = 'now';
-    formData.set(userId, data);
-
-    await client.views.update({
-      view_id: body.view.id,
-      view: createScheduleModal(data)
-    });
-  } catch (error) {
-    console.error('timing_now error:', error);
-  }
-});
-
-app.action('timing_schedule', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    let data = formData.get(userId) || {};
-    data.scheduleType = 'schedule';
-    formData.set(userId, data);
-
-    await client.views.update({
-      view_id: body.view.id,
-      view: createScheduleModal(data)
-    });
-  } catch (error) {
-    console.error('timing_schedule error:', error);
-  }
-});
-
-// Channel selection
-app.action('channel_select', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    const selectedChannel = body.actions[0].selected_conversation;
-    let data = formData.get(userId) || {};
-    data.channel = selectedChannel;
-    formData.set(userId, data);
-    console.log(`Channel selected: ${selectedChannel}`);
-
-    // Test channel access
-    try {
-      const channelInfo = await client.conversations.info({ channel: selectedChannel });
-      console.log(`Channel verified: #${channelInfo.channel.name}`);
-    } catch (error) {
-      console.error(`Channel verification failed:`, error.data?.error);
-    }
-  } catch (error) {
-    console.error('channel_select error:', error);
-  }
-});
-
-// Poll form handlers
-app.action('poll_type_radio', async ({ ack, body, client }) => {
-  await ack();
-  try {
+    await ack();
     const userId = body.user.id;
     const selectedType = body.actions[0].selected_option.value;
     let data = formData.get(userId) || {};
@@ -1013,9 +961,10 @@ app.action('poll_type_radio', async ({ ack, body, client }) => {
   }
 });
 
-app.action('add_poll_option', async ({ ack, body, client }) => {
-  await ack();
+// Add/remove poll options
+app.action(`${ACTION_PREFIX}add_poll_option`, async ({ ack, body, client }) => {
   try {
+    await ack();
     const userId = body.user.id;
     let data = formData.get(userId) || {};
 
@@ -1031,9 +980,11 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
       index++;
     }
 
-    options.push(`Option ${options.length + 1}`);
-    data.pollOptions = options.join('\n');
-    formData.set(userId, data);
+    if (options.length < 10) {
+      options.push(`Option ${options.length + 1}`);
+      data.pollOptions = options.join('\n');
+      formData.set(userId, data);
+    }
 
     await client.views.update({
       view_id: body.view.id,
@@ -1044,9 +995,9 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
   }
 });
 
-app.action('remove_poll_option', async ({ ack, body, client }) => {
-  await ack();
+app.action(`${ACTION_PREFIX}remove_poll_option`, async ({ ack, body, client }) => {
   try {
+    await ack();
     const userId = body.user.id;
     let data = formData.get(userId) || {};
 
@@ -1064,10 +1015,9 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
 
     if (options.length > 2) {
       options.pop();
+      data.pollOptions = options.join('\n');
+      formData.set(userId, data);
     }
-
-    data.pollOptions = options.join('\n');
-    formData.set(userId, data);
 
     await client.views.update({
       view_id: body.view.id,
@@ -1078,186 +1028,10 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
   }
 });
 
-// Submit message handler
-app.action('submit_message', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    let data = formData.get(userId) || {};
-
-    // Extract final form data
-    if (body.view?.state?.values) {
-      const values = body.view.state.values;
-
-      // Channel
-      if (values.channel_block?.channel_select?.selected_conversation) {
-        data.channel = values.channel_block.channel_select.selected_conversation;
-      }
-
-      // Alert channels for help messages
-      if (data.type === 'help' && values.alert_channels_block?.alert_channels_select?.selected_conversations) {
-        data.alertChannels = values.alert_channels_block.alert_channels_select.selected_conversations;
-      }
-
-      // Date/time/repeat (if present)
-      if (values.datetime_block?.date_picker?.selected_date) {
-        data.date = values.datetime_block.date_picker.selected_date;
-      }
-      if (values.datetime_block?.time_picker?.selected_time) {
-        data.time = values.datetime_block.time_picker.selected_time;
-      }
-      if (values.repeat_block?.repeat_select?.selected_option?.value) {
-        data.repeat = values.repeat_block.repeat_select.selected_option.value;
-      }
-    }
-
-    // Validation
-    if (!data.channel) {
-      await client.chat.postEphemeral({
-        channel: body.user.id,
-        user: userId,
-        text: `Please select a channel first.${cat()}`
-      });
-      return;
-    }
-
-    if (data.type === 'help' && (!data.alertChannels || data.alertChannels.length === 0)) {
-      await client.chat.postEphemeral({
-        channel: body.user.id,
-        user: userId,
-        text: `Please select at least one alert channel for help notifications.${cat()}`
-      });
-      return;
-    }
-
-    if (data.type === 'poll' && data.pollType !== 'open') {
-      const options = (data.pollOptions || '').split('\n').filter(Boolean);
-      if (options.length < 2) {
-        await client.chat.postEphemeral({
-          channel: body.user.id,
-          user: userId,
-          text: `Please provide at least 2 poll options.${cat()}`
-        });
-        return;
-      }
-    }
-
-    // Generate ID if needed
-    if (!data.id) {
-      data.id = generateId();
-    }
-
-    // Process message
-    if (data.scheduleType === 'now') {
-      // Post immediately
-      const success = await sendMessage(data);
-      
-      await client.views.update({
-        view_id: body.view.id,
-        view: {
-          type: 'modal',
-          title: { type: 'plain_text', text: success ? 'Message Posted!' : 'Post Failed' },
-          close: { type: 'plain_text', text: 'Close' },
-          blocks: [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: success ? 
-                  `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message posted to <#${data.channel}>!${cat()}` :
-                  `Failed to post message. Please check that I'm invited to <#${data.channel}>.${cat()}`
-              }
-            }
-          ]
-        }
-      });
-    } else {
-      // Schedule for later
-      if (data.repeat === 'none' && isDateTimeInPast(data.date, data.time)) {
-        await client.views.update({
-          view_id: body.view.id,
-          view: {
-            type: 'modal',
-            title: { type: 'plain_text', text: 'Schedule Failed' },
-            close: { type: 'plain_text', text: 'Close' },
-            blocks: [
-              {
-                type: 'section',
-                text: {
-                  type: 'mrkdwn',
-                  text: `Cannot schedule messages in the past. Please select a future date and time.${cat()}`
-                }
-              }
-            ]
-          }
-        });
-        return;
-      }
-
-      // Add to scheduled messages
-      const existingIndex = scheduledMessages.findIndex(m => m.id === data.id);
-      if (existingIndex >= 0) {
-        scheduledMessages[existingIndex] = data;
-      } else {
-        scheduledMessages.push(data);
-      }
-
-      saveMessages();
-      scheduleJob(data);
-
-      await client.views.update({
-        view_id: body.view.id,
-        view: {
-          type: 'modal',
-          title: { type: 'plain_text', text: 'Message Scheduled!' },
-          close: { type: 'plain_text', text: 'Close' },
-          blocks: [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`
-              }
-            }
-          ]
-        }
-      });
-    }
-
-    // Clear form data
-    formData.delete(userId);
-
-  } catch (error) {
-    console.error('submit_message error:', error);
-    
-    try {
-      await client.views.update({
-        view_id: body.view.id,
-        view: {
-          type: 'modal',
-          title: { type: 'plain_text', text: 'Error' },
-          close: { type: 'plain_text', text: 'Close' },
-          blocks: [
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `An error occurred. Please try again.${cat()}`
-              }
-            }
-          ]
-        }
-      });
-    } catch (modalError) {
-      console.error('Could not update modal with error:', modalError);
-    }
-  }
-});
-
 // Delete scheduled message
-app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
-  await ack();
+app.action(new RegExp(`^${ACTION_PREFIX}delete_message_.+`), async ({ ack, body, client, action }) => {
   try {
+    await ack();
     const msgId = action.value;
 
     scheduledMessages = scheduledMessages.filter(msg => msg.id !== msgId);
@@ -1282,11 +1056,13 @@ app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
   }
 });
 
-// Poll voting
-app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
-  await ack();
+// Poll voting with persistence
+app.action(new RegExp(`^${ACTION_PREFIX}poll_vote_.+`), async ({ ack, body, client, action }) => {
   try {
-    const [, , msgId, optionId] = action.action_id.split('_');
+    await ack();
+    const parts = action.action_id.split('_');
+    const msgId = parts[3];
+    const optionId = parts[4];
     const user = body.user.id;
 
     if (!pollVotes[msgId]) {
@@ -1307,7 +1083,9 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     const pollType = msg.pollType || 'single';
 
     if (pollType === 'single') {
+      // Remove user from all options first
       Object.values(pollVotes[msgId]).forEach(set => set.delete(user));
+      // Add to selected option
       pollVotes[msgId][optionId].add(user);
     } else if (pollType === 'multiple') {
       if (pollVotes[msgId][optionId].has(user)) {
@@ -1317,7 +1095,11 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
       }
     }
 
-    await app.client.chat.postEphemeral({
+    // Save poll votes
+    savePollVotes();
+
+    // Send confirmation
+    await client.chat.postEphemeral({
       channel: body.channel.id,
       user: user,
       text: `Vote recorded${cat()}`
@@ -1328,9 +1110,9 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
 });
 
 // Help button clicks
-app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
-  await ack();
+app.action(new RegExp(`^${ACTION_PREFIX}help_click_.+`), async ({ ack, body, client, action }) => {
   try {
+    await ack();
     const actionData = JSON.parse(action.value);
     const msgId = actionData.msgId;
     const alertChannels = actionData.alertChannels || [];
@@ -1346,8 +1128,25 @@ app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
       return;
     }
 
+    // Verify access to alert channels
+    const validChannels = [];
+    for (const alertChannel of alertChannels) {
+      if (await verifyChannelAccess(client, alertChannel)) {
+        validChannels.push(alertChannel);
+      }
+    }
+
+    if (validChannels.length === 0) {
+      await client.chat.postEphemeral({
+        channel,
+        user,
+        text: 'Unable to send alerts - bot needs to be added to the alert channels.'
+      });
+      return;
+    }
+
     let successCount = 0;
-    const alertPromises = alertChannels.map(async (alertChannel) => {
+    const alertPromises = validChannels.map(async (alertChannel) => {
       try {
         await client.chat.postMessage({
           channel: alertChannel,
@@ -1357,7 +1156,7 @@ app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
         });
         successCount++;
       } catch (e) {
-        console.error(`Alert failed for channel ${alertChannel}:`, e);
+        console.error(`Alert failed for channel ${alertChannel}:`, e.data?.error);
       }
     });
 
@@ -1366,13 +1165,13 @@ app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
     await client.chat.postEphemeral({
       channel,
       user,
-      text: `Backup request sent to ${successCount}/${alertChannels.length} alert channels.${cat()}`
+      text: `Backup request sent to ${successCount}/${validChannels.length} alert channels.${cat()}`
     });
 
     if (successCount > 0) {
       await client.chat.postMessage({
         channel,
-        text: `🚨 <@${user}> has hit the help button${cat()}`
+        text: `🚨 <@${user}> has requested backup!${cat()}`
       });
     }
   } catch (error) {
@@ -1380,12 +1179,139 @@ app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
   }
 });
 
-// Global error handler
-app.error((error) => {
-  console.error('Global error:', error);
+// ================================
+// VIEW SUBMISSION HANDLER
+// ================================
+
+app.view(`${ACTION_PREFIX}schedule_submit`, async ({ ack, body, view, client }) => {
+  try {
+    const userId = body.user.id;
+    let data = formData.get(userId) || {};
+    const values = view.state.values;
+
+    // Extract all form values
+    data.channel = values.channel_block?.channel_select?.selected_conversation;
+    
+    if (data.type === 'help') {
+      data.alertChannels = values.alert_channels_block?.alert_channels_select?.selected_conversations || [];
+    }
+
+    const timingValue = values.send_timing_block?.timing_radio?.selected_option?.value;
+    data.scheduleType = timingValue || 'schedule';
+
+    if (data.scheduleType === 'schedule') {
+      data.date = values.datetime_section?.date_picker?.selected_date || todayInEST();
+      data.time = values.time_section?.time_picker?.selected_time || '09:00';
+      data.repeat = values.repeat_block?.repeat_select?.selected_option?.value || 'none';
+    }
+
+    // Validation
+    const errors = {};
+    
+    if (!data.channel) {
+      errors.channel_block = 'Please select a channel';
+    }
+
+    if (data.type === 'help' && (!data.alertChannels || data.alertChannels.length === 0)) {
+      errors.alert_channels_block = 'Please select at least one alert channel';
+    }
+
+    if (data.type === 'poll' && data.pollType !== 'open') {
+      const options = (data.pollOptions || '').split('\n').filter(Boolean);
+      if (options.length < 2) {
+        await ack({
+          response_action: 'errors',
+          errors: { ...errors, text_block: 'Polls need at least 2 options' }
+        });
+        return;
+      }
+    }
+
+    if (data.scheduleType === 'schedule' && data.repeat === 'none' && isDateTimeInPast(data.date, data.time)) {
+      errors.datetime_section = 'Cannot schedule in the past';
+    }
+
+    // Check for duplicate schedules
+    if (data.scheduleType === 'schedule' && isDuplicateSchedule(data)) {
+      await ack({
+        response_action: 'errors',
+        errors: { channel_block: 'A similar message is already scheduled for this time' }
+      });
+      return;
+    }
+
+    if (Object.keys(errors).length > 0) {
+      await ack({
+        response_action: 'errors',
+        errors
+      });
+      return;
+    }
+
+    // Generate ID if needed
+    if (!data.id) {
+      data.id = generateId();
+    }
+
+    // Process message
+    if (data.scheduleType === 'now') {
+      await ack();
+      
+      // Send immediately
+      const success = await sendMessage(data);
+      
+      if (!success) {
+        await client.chat.postEphemeral({
+          channel: data.channel,
+          user: userId,
+          text: `Failed to post message. Please check that the bot is in <#${data.channel}>.${cat()}`
+        });
+      }
+    } else {
+      // Schedule for later
+      scheduledMessages.push(data);
+      saveMessages();
+      scheduleJob(data);
+      
+      await ack({
+        response_action: 'update',
+        view: {
+          type: 'modal',
+          title: { type: 'plain_text', text: 'Success!' },
+          close: { type: 'plain_text', text: 'Close' },
+          blocks: [
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `✅ ${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled!${cat()}\n\n📅 *When:* ${data.date} at ${formatTimeDisplay(data.time)}\n📍 *Where:* <#${data.channel}>\n🔄 *Repeat:* ${data.repeat !== 'none' ? data.repeat : 'One-time'}`
+              }
+            }
+          ]
+        }
+      });
+    }
+
+    // Clear form data
+    formData.delete(userId);
+    formTimestamps.delete(userId);
+
+  } catch (error) {
+    console.error('View submission error:', error);
+    await ack({
+      response_action: 'errors',
+      errors: {
+        channel_block: 'An error occurred. Please try again.'
+      }
+    }).catch(() => {});
+  }
 });
 
-// Cleanup job
+// ================================
+// CLEANUP & MAINTENANCE
+// ================================
+
+// Cleanup expired messages hourly
 cron.schedule('0 * * * *', () => {
   const beforeCount = scheduledMessages.length;
   scheduledMessages = scheduledMessages.filter(msg => {
@@ -1410,22 +1336,49 @@ cron.schedule('0 * * * *', () => {
   timezone: 'America/New_York'
 });
 
-// Startup
+// Global error handler
+app.error(async (error) => {
+  console.error('Global error:', error);
+  
+  // Log specific error types
+  if (error.code === 'slack_webapi_platform_error') {
+    console.error('Platform error details:', error.data);
+  }
+});
+
+// ================================
+// STARTUP
+// ================================
+
 (async () => {
   try {
     await app.start();
-    console.log('PM Squad Bot is running! (WORKING ARCHITECTURE VERSION)');
-    console.log(`Loaded ${scheduledMessages.length} scheduled messages`);
-    console.log(`Active jobs: ${jobs.size}`);
-    console.log('Use /pm to start.');
+    console.log('🐈‍⬛ PM Squad Bot is running! (REFACTORED VERSION)');
+    console.log(`📅 Loaded ${scheduledMessages.length} scheduled messages`);
+    console.log(`⏰ Active jobs: ${jobs.size}`);
+    console.log(`📊 Poll data loaded for ${Object.keys(pollVotes).length} polls`);
+    console.log('💬 Use /pm to start');
   } catch (error) {
     console.error('Failed to start app:', error);
     process.exit(1);
   }
 })();
 
+// Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('Shutting down, cleaning up jobs...');
-  jobs.forEach(job => job.destroy());
+  console.log('\n🛑 Shutting down gracefully...');
+  
+  // Save all data
+  saveMessages();
+  savePollVotes();
+  
+  // Clean up jobs
+  jobs.forEach(job => {
+    try {
+      job.destroy();
+    } catch (_) {}
+  });
+  
+  console.log('✅ Cleanup complete');
   process.exit(0);
 });
