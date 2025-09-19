@@ -708,7 +708,7 @@ function createModal(page, data = {}) {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: "_Open discussion polls don't need predefined options. People will respond in the message thread._"
+            text: '_Open discussion polls don\\'t need predefined options. People will respond in the message thread._'
           }
         });
       }
@@ -2026,12 +2026,25 @@ cron.schedule('0 * * * *', () => {
 });
 
 // ================================
-// STARTUP
+// STARTUP - MOVED KEEP-ALIVE SERVER TO TOP
 // ================================
 
 (async () => {
   try {
+    // FIXED: Start HTTP server FIRST so Render detects the port immediately
+    const keepAliveServer = require('http').createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('PM Squad Bot is running!');
+    });
+
+    const PORT = process.env.PORT || 3000;
+    keepAliveServer.listen(PORT, () => {
+      console.log(`🌐 Keep-alive server running on port ${PORT}`);
+    });
+
+    // Now start the Slack app
     await app.start();
+    
     console.log('₍^. .^₎⟆ PM Squad Bot "Cat Scratch" is running! (FIXED VERSION)');
     console.log(`₍^. .^₎⟆ Loaded ${scheduledMessages.length} scheduled messages`);
     console.log(`₍^. .^₎⟆ Active jobs: ${jobs.size}`);
