@@ -708,7 +708,7 @@ function createModal(page, data = {}) {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: '_Open discussion polls don\\'t need predefined options. People will respond in the message thread._'
+            text: "_Open discussion polls don't need predefined options. People will respond in the message thread."
           }
         });
       }
