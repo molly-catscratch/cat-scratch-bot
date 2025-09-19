@@ -1706,6 +1706,9 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
 
     if (!pollData) {
       console.error(`Poll data not found for msgId: ${msgId}`);
+      console.log('Available active polls:', Array.from(activePollMessages.keys()));
+      console.log('Available scheduled polls:', scheduledMessages.map(m => m.id));
+      
       try {
         await client.chat.postEphemeral({
           channel: channel || user,
@@ -1718,9 +1721,16 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
       return;
     }
 
+    console.log('Found poll data:', JSON.stringify(pollData, null, 2));
+
     const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
     console.log(`Poll options:`, options);
-    console.log(`Poll data ID:`, pollData.id);
+
+    // CRITICAL: Ensure poll data is stored in activePollMessages for future updates
+    if (messageTs && !activePollMessages.has(messageTs)) {
+      activePollMessages.set(messageTs, pollData);
+      console.log(`Stored poll data in activePollMessages for ${messageTs}`);
+    }
 
     // CRITICAL FIX: Initialize vote tracking completely
     if (!pollVotes[msgId]) {
