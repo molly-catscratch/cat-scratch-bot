@@ -625,160 +625,106 @@ function createModal(page, data = {}) {
             type: 'mrkdwn', 
             text: '*Poll Configuration*' 
           }
-        }
-      );
-
-      const radioOptions = [
-        {
-          text: { type: 'plain_text', text: 'Single Choice' },
-          description: { type: 'plain_text', text: 'One selection per person' },
-          value: 'single'
         },
         {
-          text: { type: 'plain_text', text: 'Multiple Choice' },
-          description: { type: 'plain_text', text: 'Multiple selections allowed' },
-          value: 'multiple'
-        },
-        {
-          text: { type: 'plain_text', text: 'Open Discussion' },
-          description: { type: 'plain_text', text: 'Thread-based responses' },
-          value: 'open'
-        }
-      ];
-
-      const selectedType = data.pollType || 'single';
-      let initialOption = radioOptions[0];
-      if (selectedType === 'multiple') {
-        initialOption = radioOptions[1];
-      } else if (selectedType === 'open') {
-        initialOption = radioOptions[2];
-      }
-
-      commonBlocks.push({
-        type: 'section',
-        block_id: 'poll_type_section',
-        text: { type: 'mrkdwn', text: 'How should people vote?' },
-        accessory: {
-          type: 'radio_buttons',
-          options: radioOptions,
-          initial_option: initialOption,
-          action_id: 'poll_type_radio'
-        }
-      });
-
-      if (data.pollType !== 'open') {
-        commonBlocks.push(
-          { type: 'divider' },
-          { 
-            type: 'section', 
-            text: { 
-              type: 'mrkdwn', 
-              text: '*Poll Options*' 
-            }
-          }
-        );
-
-        const options = data.pollOptions ?
-          data.pollOptions.split('\n').filter(o => o.trim()) :
-          ['Option 1', 'Option 2'];
-
-        while (options.length < 2) {
-          options.push(`Option ${options.length + 1}`);
-        }
-
-        options.forEach((option, index) => {
-          commonBlocks.push({
-            type: 'input',
-            block_id: `option_${index}_block`,
-            label: { type: 'plain_text', text: `Option ${index + 1}` },
-            element: {
-              type: 'plain_text_input',
-              action_id: `option_${index}_input`,
-              initial_value: option || '',
-              placeholder: { type: 'plain_text', text: `Enter option ${index + 1}...` }
-            },
-            optional: index >= 2
-          });
-        });
-
-        const actionElements = [];
-
-        if (options.length < 10) {
-          actionElements.push({
-            type: 'button',
-            style: 'primary',
-            text: { type: 'plain_text', text: 'Add Option' },
-            action_id: 'add_poll_option',
-            value: 'add'
-          });
-        }
-
-        if (options.length > 2) {
-          actionElements.push({
-            type: 'button',
-            text: { type: 'plain_text', text: 'Remove Last Option' },
-            action_id: 'remove_poll_option',
-            style: 'danger',
-            value: 'remove'
-          });
-        }
-
-        if (actionElements.length > 0) {
-          commonBlocks.push({
-            type: 'actions',
-            elements: actionElements
-          });
-        }
-
-        const availableSettings = [
-          {
-            text: { type: 'mrkdwn', text: '*Show vote counts*' },
-            description: { type: 'mrkdwn', text: 'Display number of votes per option' },
-            value: 'show_counts'
-          },
-          {
-            text: { type: 'mrkdwn', text: '*Anonymous voting*' },
-            description: { type: 'mrkdwn', text: 'Hide who voted for what' },
-            value: 'anonymous'
-          }
-        ];
-
-        const settingsBlock = {
-          type: 'section',
-          block_id: 'poll_settings_section',
-          text: { type: 'mrkdwn', text: 'Display options:' },
-          accessory: {
-            type: 'checkboxes',
-            options: availableSettings,
-            action_id: 'poll_settings_checkboxes'
-          }
-        };
-
-        if (data.pollSettings && data.pollSettings.length > 0) {
-          const validSettings = data.pollSettings.filter(setting =>
-            setting === 'show_counts' || setting === 'anonymous'
-          );
-
-          if (validSettings.length > 0) {
-            settingsBlock.accessory.initial_options = validSettings.map(setting =>
-              availableSettings.find(option => option.value === setting)
-            ).filter(option => option);
-          }
-        }
-
-        commonBlocks.push(
-          { type: 'divider' },
-          settingsBlock
-        );
-      } else {
-        commonBlocks.push({
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: "_Open discussion polls don't need predefined options. People will respond in the message thread._"
+            text: 'All polls support multiple choice voting. Users can select multiple options and change their votes anytime.'
           }
+        }
+      );
+
+      commonBlocks.push(
+        { type: 'divider' },
+        { 
+          type: 'section', 
+          text: { 
+            type: 'mrkdwn', 
+            text: '*Poll Options*' 
+          }
+        }
+      );
+
+      const options = data.pollOptions ?
+        data.pollOptions.split('\n').filter(o => o.trim()) :
+        ['Option 1', 'Option 2'];
+
+      while (options.length < 2) {
+        options.push(`Option ${options.length + 1}`);
+      }
+
+      options.forEach((option, index) => {
+        commonBlocks.push({
+          type: 'input',
+          block_id: `option_${index}_block`,
+          label: { type: 'plain_text', text: `Option ${index + 1}` },
+          element: {
+            type: 'plain_text_input',
+            action_id: `option_${index}_input`,
+            initial_value: option || '',
+            placeholder: { type: 'plain_text', text: `Enter option ${index + 1}...` }
+          },
+          optional: index >= 2
+        });
+      });
+
+      const actionElements = [];
+
+      if (options.length < 10) {
+        actionElements.push({
+          type: 'button',
+          style: 'primary',
+          text: { type: 'plain_text', text: 'Add Option' },
+          action_id: 'add_poll_option',
+          value: 'add'
         });
       }
+
+      if (options.length > 2) {
+        actionElements.push({
+          type: 'button',
+          text: { type: 'plain_text', text: 'Remove Last Option' },
+          action_id: 'remove_poll_option',
+          style: 'danger',
+          value: 'remove'
+        });
+      }
+
+      if (actionElements.length > 0) {
+        commonBlocks.push({
+          type: 'actions',
+          elements: actionElements
+        });
+      }
+
+      const availableSettings = [
+        {
+          text: { type: 'mrkdwn', text: '*Anonymous voting*' },
+          description: { type: 'mrkdwn', text: 'Hide who voted for what (vote counts still shown)' },
+          value: 'anonymous'
+        }
+      ];
+
+      const settingsBlock = {
+        type: 'section',
+        block_id: 'poll_settings_section',
+        text: { type: 'mrkdwn', text: 'Display options:' },
+        accessory: {
+          type: 'checkboxes',
+          options: availableSettings,
+          action_id: 'poll_settings_checkboxes'
+        }
+      };
+
+      if (data.pollSettings && data.pollSettings.includes('anonymous')) {
+        settingsBlock.accessory.initial_options = [availableSettings[0]];
+      }
+
+      commonBlocks.push(
+        { type: 'divider' },
+        settingsBlock
+      );
 
     } catch (error) {
       console.error('Error creating poll form:', error);
@@ -978,46 +924,78 @@ async function sendMessage(msg) {
         console.log('Initialized vote tracking for poll:', msg.id);
       }
 
+      // Force multiple choice for all polls
+      msg.pollType = 'multiple';
+      msg.pollSettings = msg.pollSettings || ['show_counts'];
+
       let blocks = [
-        { type: 'section', text: { type: 'mrkdwn', text: `*${msg.title || 'Poll'}*${cat()}\n${msg.text || ''}` }}
+        { 
+          type: 'section', 
+          text: { 
+            type: 'mrkdwn', 
+            text: `*${msg.title || 'Poll'}*${cat()}`
+          }
+        }
       ];
 
-      if (msg.pollType !== 'open' && options.length > 0) {
-        const buttonElements = options.map((option, idx) => {
-          const actionId = `poll_vote_${msg.id}_${idx}`;
-          console.log(`Creating button ${idx}: ${actionId}`);
-          
-          return {
+      // Add poll description if it exists
+      if (msg.text) {
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: msg.text
+          }
+        });
+      }
+
+      blocks.push({ type: 'divider' });
+
+      // Create enhanced option blocks
+      options.forEach((option, idx) => {
+        const actionId = `poll_vote_${msg.id}_${idx}`;
+        console.log(`Creating button ${idx}: ${actionId}`);
+        
+        // Option section with vote button
+        blocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `*${option}*`
+          },
+          accessory: {
             type: 'button',
-            text: { type: 'plain_text', text: option.slice(0, 70) },
+            text: {
+              type: 'plain_text',
+              text: 'Vote'
+            },
             action_id: actionId,
             value: `${idx}`
-          };
+          }
         });
 
-        for (let i = 0; i < buttonElements.length; i += 5) {
-          blocks.push({
-            type: 'actions',
-            block_id: `poll_${msg.id}_${i}`,
-            elements: buttonElements.slice(i, i + 5)
-          });
-        }
-      }
+        // Initial vote count context (no votes)
+        blocks.push({
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: 'No votes'
+          }]
+        });
+      });
 
-      let contextText = msg.pollType === 'single' ? 'Click to vote. Click again to unvote.' :
-        msg.pollType === 'multiple' ? 'Click to vote (multiple choices). Click again to unvote.' :
-        'Open-ended poll. Use thread replies to respond.';
+      blocks.push({ type: 'divider' });
 
-      if (msg.pollSettings?.includes('show_counts')) {
-        contextText += ' • Vote counts: ON';
-      }
-      if (msg.pollSettings?.includes('anonymous')) {
-        contextText += ' • Anonymous voting: ON';
-      }
+      // Footer
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: 'Multiple choice poll • 0 total votes • Click again to unvote'
+        }]
+      });
 
-      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: contextText }]});
-
-      console.log('Poll blocks being sent:', JSON.stringify(blocks, null, 2));
+      console.log('Enhanced poll blocks being sent:', JSON.stringify(blocks, null, 2));
 
       const result = await app.client.chat.postMessage({
         channel: msg.channel,
@@ -1792,51 +1770,31 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
 
     console.log(`Vote tracking state for ${msgId}:`, Object.keys(pollVotes[msgId]));
 
-    const pollType = pollData.pollType || 'single';
-    let userVoteChanged = false;
-
-    if (pollType === 'single') {
-      const wasVotedHere = pollVotes[msgId][optionIndex].has(user);
-      
-      // Remove user from all options
-      Object.values(pollVotes[msgId]).forEach(set => {
-        if (set && typeof set.delete === 'function') {
-          set.delete(user);
-        }
-      });
-      
-      // If they weren't already voted here, add their vote
-      if (!wasVotedHere) {
-        pollVotes[msgId][optionIndex].add(user);
-      }
+    // Multiple choice logic - toggle vote for this option only
+    if (pollVotes[msgId][optionIndex].has(user)) {
+      pollVotes[msgId][optionIndex].delete(user);
+      console.log(`Removed vote from option ${optionIndex}`);
       userVoteChanged = true;
-      
-    } else if (pollType === 'multiple') {
-      if (pollVotes[msgId][optionIndex].has(user)) {
-        pollVotes[msgId][optionIndex].delete(user);
-        console.log(`Removed vote from option ${optionIndex}`);
-      } else {
-        pollVotes[msgId][optionIndex].add(user);
-        console.log(`Added vote to option ${optionIndex}`);
-      }
+    } else {
+      pollVotes[msgId][optionIndex].add(user);
+      console.log(`Added vote to option ${optionIndex}`);
       userVoteChanged = true;
     }
 
-    // Update the poll message with new vote counts
+    // Update the poll message with new vote counts using REAL data
     if (userVoteChanged && messageTs && channel) {
       await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
     }
 
     // Send confirmation to user
     try {
-      const voteStatus = pollType === 'single' ? 
-        (pollVotes[msgId][optionIndex].has(user) ? 'Vote recorded' : 'Vote removed') :
-        (pollVotes[msgId][optionIndex].has(user) ? 'Vote added' : 'Vote removed');
+      const voteStatus = pollVotes[msgId][optionIndex].has(user) ? 'Vote added' : 'Vote removed';
+      const optionText = options[optionIndex];
         
       await client.chat.postEphemeral({
         channel: channel || user,
         user: user,
-        text: `${voteStatus}!`
+        text: `${voteStatus} for "${optionText}"!`
       });
     } catch (epErr) {
       console.log('Could not send ephemeral vote confirmation.');
