@@ -614,7 +614,7 @@ function createModal(page, data = {}) {
     }
   );
 
-  // POLL specific blocks
+  // POLL specific blocks - NO ANONYMOUS VOTING
   if (page === 'poll') {
     try {
       commonBlocks.push(
@@ -630,7 +630,7 @@ function createModal(page, data = {}) {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: 'All polls support multiple choice voting. Users can select multiple options and change their votes anytime.'
+            text: 'All polls support multiple choice voting. Users can select multiple options and change their votes anytime. Voter names are always visible.'
           }
         }
       );
@@ -697,34 +697,6 @@ function createModal(page, data = {}) {
           elements: actionElements
         });
       }
-
-      const availableSettings = [
-        {
-          text: { type: 'mrkdwn', text: '*Anonymous voting*' },
-          description: { type: 'mrkdwn', text: 'Hide who voted for what (vote counts still shown)' },
-          value: 'anonymous'
-        }
-      ];
-
-      const settingsBlock = {
-        type: 'section',
-        block_id: 'poll_settings_section',
-        text: { type: 'mrkdwn', text: 'Display options:' },
-        accessory: {
-          type: 'checkboxes',
-          options: availableSettings,
-          action_id: 'poll_settings_checkboxes'
-        }
-      };
-
-      if (data.pollSettings && data.pollSettings.includes('anonymous')) {
-        settingsBlock.accessory.initial_options = [availableSettings[0]];
-      }
-
-      commonBlocks.push(
-        { type: 'divider' },
-        settingsBlock
-      );
 
     } catch (error) {
       console.error('Error creating poll form:', error);
@@ -924,9 +896,9 @@ async function sendMessage(msg) {
         console.log('Initialized vote tracking for poll:', msg.id);
       }
 
-      // Force multiple choice for all polls
+      // Force multiple choice for all polls, no anonymous voting
       msg.pollType = 'multiple';
-      msg.pollSettings = msg.pollSettings || ['show_counts'];
+      msg.pollSettings = [];
 
       let blocks = [
         { 
@@ -1689,29 +1661,46 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     if (!pollData && body.message?.blocks) {
       console.log('Poll data not found in storage, attempting to reconstruct from message');
       
-      const buttonBlocks = body.message.blocks.filter(block => block.type === 'actions');
+      // Extract title from first section block
+      let reconstructedTitle = 'Poll';
+      let reconstructedText = '';
       const extractedOptions = [];
       
-      buttonBlocks.forEach(block => {
-        block.elements?.forEach(element => {
-          if (element.type === 'button' && element.action_id?.startsWith('poll_vote_')) {
-            extractedOptions.push(element.text.text.replace(/ \(\d+\)$/, ''));
+      body.message.blocks.forEach(block => {
+        // Get title from first section
+        if (block.type === 'section' && block.text?.text && !reconstructedTitle.includes('*')) {
+          const titleMatch = block.text.text.match(/\*(.+?)\*/);
+          if (titleMatch) {
+            reconstructedTitle = titleMatch[1].replace(/₍\^. \.\^\�/, '').trim();
           }
-        });
+        }
+        
+        // Get description from second section (if exists)
+        if (block.type === 'section' && block.text?.text && !block.text.text.includes('*') && !block.accessory) {
+          reconstructedText = block.text.text;
+        }
+        
+        // Extract options from sections with buttons
+        if (block.type === 'section' && block.accessory?.type === 'button') {
+          const optionText = block.text.text.replace(/\*(.+?)\*/, '$1').trim();
+          if (optionText && !extractedOptions.includes(optionText)) {
+            extractedOptions.push(optionText);
+          }
+        }
       });
       
       if (extractedOptions.length > 0) {
         pollData = {
           id: msgId,
           pollOptions: extractedOptions.join('\n'),
-          pollType: 'single',
-          pollSettings: ['show_counts'],
-          title: 'Poll',
-          text: ''
+          pollType: 'multiple',
+          pollSettings: [],
+          title: reconstructedTitle,
+          text: reconstructedText
         };
         
         activePollMessages.set(messageTs, pollData);
-        console.log('Reconstructed poll data from message');
+        console.log('Reconstructed poll data:', pollData);
       }
     }
 
@@ -1783,6 +1772,7 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
 
     // Update the poll message with new vote counts using REAL data
     if (userVoteChanged && messageTs && channel) {
+      console.log('About to update poll message with vote data:', JSON.stringify(pollVotes[msgId], null, 2));
       await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
     }
 
