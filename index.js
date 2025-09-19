@@ -966,6 +966,8 @@ async function sendMessage(msg) {
     } else if (msg.type === 'poll') {
       console.log('Sending poll message...');
       const options = (msg.pollOptions || '').split('\n').map(s => s.trim()).filter(Boolean);
+      console.log('Poll options:', options);
+      console.log('Poll ID for buttons:', msg.id);
 
       // Initialize vote tracking with proper error handling
       if (!pollVotes[msg.id]) {
@@ -973,6 +975,7 @@ async function sendMessage(msg) {
         for (let i = 0; i < options.length; i++) {
           pollVotes[msg.id][i] = new Set();
         }
+        console.log('Initialized vote tracking for poll:', msg.id);
       }
 
       let blocks = [
@@ -980,12 +983,17 @@ async function sendMessage(msg) {
       ];
 
       if (msg.pollType !== 'open' && options.length > 0) {
-        const buttonElements = options.map((option, idx) => ({
-          type: 'button',
-          text: { type: 'plain_text', text: option.slice(0, 70) },
-          action_id: `poll_vote_${msg.id}_${idx}`,
-          value: `${idx}`
-        }));
+        const buttonElements = options.map((option, idx) => {
+          const actionId = `poll_vote_${msg.id}_${idx}`;
+          console.log(`Creating button ${idx}: ${actionId}`);
+          
+          return {
+            type: 'button',
+            text: { type: 'plain_text', text: option.slice(0, 70) },
+            action_id: actionId,
+            value: `${idx}`
+          };
+        });
 
         for (let i = 0; i < buttonElements.length; i += 5) {
           blocks.push({
@@ -1009,6 +1017,8 @@ async function sendMessage(msg) {
 
       blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: contextText }]});
 
+      console.log('Poll blocks being sent:', JSON.stringify(blocks, null, 2));
+
       const result = await app.client.chat.postMessage({
         channel: msg.channel,
         text: msg.title || 'Poll',
@@ -1017,7 +1027,7 @@ async function sendMessage(msg) {
 
       if (result.ok && result.ts) {
         activePollMessages.set(result.ts, msg);
-        console.log(`Stored poll metadata for message ${result.ts}`);
+        console.log(`Stored poll metadata for message ${result.ts}:`, msg.id);
       }
 
     } else if (msg.type === 'help') {
@@ -1662,18 +1672,34 @@ app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
   }
 });
 
-// FIXED POLL VOTING HANDLER
+// FIXED POLL VOTING HANDLER WITH BETTER DEBUGGING
 app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
   await ack();
   
   try {
-    const [, , msgId, optionId] = action.action_id.split('_');
+    console.log('Raw action_id received:', action.action_id);
+    console.log('Action value:', action.value);
+    
+    const actionParts = action.action_id.split('_');
+    console.log('Action parts:', actionParts);
+    
+    if (actionParts.length < 4) {
+      throw new Error(`Invalid action_id format: ${action.action_id}. Expected: poll_vote_msgId_optionIndex`);
+    }
+    
+    const msgId = actionParts.slice(2, -1).join('_'); // Handle msgIds with underscores
+    const optionId = actionParts[actionParts.length - 1];
+    const optionIndex = parseInt(optionId);
+    
     const user = body.user.id;
     const channel = body.channel?.id;
     const messageTs = body.message?.ts;
-    const optionIndex = parseInt(optionId);
 
-    console.log(`Poll vote received: msgId=${msgId}, optionId=${optionId}, user=${user}, messageTs=${messageTs}`);
+    console.log(`Poll vote parsed: msgId=${msgId}, optionId=${optionId}, optionIndex=${optionIndex}, user=${user}, messageTs=${messageTs}`);
+
+    if (isNaN(optionIndex)) {
+      throw new Error(`Invalid option index: ${optionId} is not a number`);
+    }
 
     // Find poll data
     let pollData = scheduledMessages.find(m => m.id === msgId);
@@ -1727,16 +1753,19 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
 
     const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
     console.log(`Poll options:`, options);
+    console.log(`Poll data ID:`, pollData.id);
 
     // CRITICAL FIX: Initialize vote tracking completely
     if (!pollVotes[msgId]) {
       pollVotes[msgId] = {};
+      console.log(`Created new vote tracking for msgId: ${msgId}`);
     }
 
     // Ensure ALL option indices exist as Sets
     for (let i = 0; i < options.length; i++) {
       if (!pollVotes[msgId][i]) {
         pollVotes[msgId][i] = new Set();
+        console.log(`Created vote set for option ${i}`);
       }
     }
 
@@ -1758,7 +1787,10 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     // Double-check that the specific option exists
     if (!pollVotes[msgId][optionIndex]) {
       pollVotes[msgId][optionIndex] = new Set();
+      console.log(`Created missing vote set for option ${optionIndex}`);
     }
+
+    console.log(`Vote tracking state for ${msgId}:`, Object.keys(pollVotes[msgId]));
 
     const pollType = pollData.pollType || 'single';
     let userVoteChanged = false;
