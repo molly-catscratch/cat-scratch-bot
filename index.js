@@ -1,4 +1,95 @@
-/**
+// FORM PAGES (capacity, poll, help, custom)
+  const commonBlocks = [
+    { 
+      type: 'header', 
+      text: { 
+        type: 'plain_text', 
+        text: `Step 1: Create Your ${page.charAt(0).toUpperCase() + page.slice(1)} Message` 
+      }
+    },
+    { type: 'divider' }
+  ];
+
+  if ((page === 'capacity' || page === 'help') && !data.userModifiedText) {
+    const templateInfo = page === 'capacity' ?
+      'Using default capacity check template. Feel free to customize the message text below.' :
+      'Using default help button template. Feel free to customize the message text below.';
+
+    commonBlocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*${templateInfo}*`
+      }
+    });
+  }
+
+  commonBlocks.push(
+    ...(page !== 'capacity' && page !== 'help' ? [{
+      type: 'input',
+      block_id: 'title_block',
+      label: { type: 'plain_text', text: 'Title (optional)' },
+      element: {
+        type: 'plain_text_input',
+        action_id: 'title_input',
+        initial_value: data.title || '',
+        placeholder: { type: 'plain_text', text: 'Enter a catchy title for your message...' }
+      },
+      optional: true
+    }] : []),
+    {
+      type: 'input',
+      block_id: 'text_block',
+      label: { type: 'plain_text', text: 'Message Text' },
+      element: {
+        type: 'plain_text_input',
+        action_id: 'text_input',
+        multiline: true,
+        initial_value: getInitialTextValue(page, data),
+        placeholder: { type: 'plain_text', text: 'Enter your message content here...' }
+      }
+    }
+  );
+
+  // POLL specific blocks
+  if (page === 'poll') {
+    console.log('🎯 Adding POLL-specific blocks');
+    try {
+      commonBlocks.push(
+        { type: 'divider' },
+        { 
+          type: 'section', 
+          text: { 
+            type: 'mrkdwn', 
+            text: '*Poll Configuration*' 
+          }
+        }
+      );
+
+      const radioOptions = [
+        {
+          text: { type: 'plain_text', text: 'Single Choice' },
+          description: { type: 'plain_text', text: 'One selection per person' },
+          value: 'single'
+        },
+        {
+          text: { type: 'plain_text', text: 'Multiple Choice' },
+          description: { type: 'plain_text', text: 'Multiple selections allowed' },
+          value: 'multiple'
+        },
+        {
+          text: { type: 'plain_text', text: 'Open Discussion' },
+          description: { type: 'plain_text', text: 'Thread-based responses' },
+          value: 'open'
+        }
+      ];
+
+      const selectedType = data.pollType || 'single';
+      let initialOption;
+      if (selectedType === 'multiple') {
+        initialOption = radioOptions[1];
+      } else if (selectedType === 'open') {
+        initialOption = radioOptions/**
  * PM Squad Bot - Cat Scratch (FIXED VERSION)
  * Flow: Menu → Form (content) → Preview → Schedule (channel + timing) → Send/Schedule
  * Requirements: npm i @slack/bolt node-cron dotenv
@@ -277,27 +368,69 @@ function createModal(page, data = {}) {
       ...base,
       title: { type: 'plain_text', text: 'Cat Scratch Menu' },
       blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: '*Choose a message type:*' }},
+        { 
+          type: 'header', 
+          text: { 
+            type: 'plain_text', 
+            text: 'Choose Your Message Type' 
+          }
+        },
         { type: 'divider' },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '*Team Communication Tools*'
+          }
+        },
         {
           type: 'actions',
           elements: [
-            { type: 'button', text: { type: 'plain_text', text: 'Capacity Check' }, action_id: 'nav_capacity' },
-            { type: 'button', text: { type: 'plain_text', text: 'Poll' }, action_id: 'nav_poll' }
+            { 
+              type: 'button', 
+              style: 'primary',
+              text: { type: 'plain_text', text: 'Capacity Check' }, 
+              action_id: 'nav_capacity' 
+            },
+            { 
+              type: 'button', 
+              text: { type: 'plain_text', text: 'Poll' }, 
+              action_id: 'nav_poll' 
+            }
           ]
         },
         {
           type: 'actions',
           elements: [
-            { type: 'button', text: { type: 'plain_text', text: 'Help Button' }, action_id: 'nav_help' },
-            { type: 'button', text: { type: 'plain_text', text: 'Custom Message' }, action_id: 'nav_custom' }
+            { 
+              type: 'button', 
+              style: 'danger',
+              text: { type: 'plain_text', text: 'Help Button' }, 
+              action_id: 'nav_help' 
+            },
+            { 
+              type: 'button', 
+              text: { type: 'plain_text', text: 'Custom Message' }, 
+              action_id: 'nav_custom' 
+            }
           ]
         },
         { type: 'divider' },
         {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '*Management*'
+          }
+        },
+        {
           type: 'actions',
           elements: [
-            { type: 'button', text: { type: 'plain_text', text: 'View Scheduled' }, action_id: 'nav_scheduled' }
+            { 
+              type: 'button', 
+              text: { type: 'plain_text', text: 'View Scheduled Messages' }, 
+              action_id: 'nav_scheduled' 
+            }
           ]
         }
       ]
@@ -307,20 +440,33 @@ function createModal(page, data = {}) {
   // SCHEDULED PAGE
   if (page === 'scheduled') {
     const blocks = [
-      { type: 'section', text: { type: 'mrkdwn', text: `*Scheduled Messages* (${scheduledMessages.length} total)` }},
+      { 
+        type: 'header', 
+        text: { 
+          type: 'plain_text', 
+          text: `Scheduled Messages (${scheduledMessages.length} total)` 
+        }
+      },
       { type: 'divider' }
     ];
 
     if (scheduledMessages.length === 0) {
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `_No scheduled messages yet_${cat()}` }});
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*No scheduled messages yet*\n\nCreate your first scheduled message using the menu above! ${cat()}`
+        }
+      });
     } else {
       scheduledMessages.forEach(msg => {
         const nextRun = msg.repeat === 'none' ? `${msg.date} at ${formatTimeDisplay(msg.time)}` : `${msg.repeat} at ${formatTimeDisplay(msg.time)}`;
+        
         blocks.push({
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: `*${msg.title || msg.type}*\n📅 ${nextRun}\n📍 <#${msg.channel}>\n_${(msg.text || '').substring(0, 100)}${(msg.text || '').length > 100 ? '...' : ''}_`
+            text: `*${msg.title || msg.type}*\n${nextRun}\n<#${msg.channel}>\n\n_${(msg.text || '').substring(0, 100)}${(msg.text || '').length > 100 ? '...' : ''}_`
           },
           accessory: {
             type: 'button',
@@ -330,7 +476,7 @@ function createModal(page, data = {}) {
             value: msg.id,
             confirm: {
               title: { type: 'plain_text', text: 'Delete Message' },
-              text: { type: 'mrkdwn', text: `Are you sure you want to delete "*${msg.title || msg.type}*"?` },
+              text: { type: 'mrkdwn', text: `Are you sure you want to delete "*${msg.title || msg.type}*"?\n\nThis action cannot be undone.` },
               confirm: { type: 'plain_text', text: 'Delete' },
               deny: { type: 'plain_text', text: 'Cancel' }
             }
@@ -341,7 +487,16 @@ function createModal(page, data = {}) {
 
     blocks.push(
       { type: 'divider' },
-      { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: 'nav_menu' }]}
+      { 
+        type: 'actions', 
+        elements: [
+          { 
+            type: 'button', 
+            text: { type: 'plain_text', text: '← Back to Menu' }, 
+            action_id: 'nav_menu' 
+          }
+        ]
+      }
     );
 
     return { ...base, blocks };
@@ -355,14 +510,43 @@ function createModal(page, data = {}) {
       ...base,
       title: { type: 'plain_text', text: `${data.type ? data.type.charAt(0).toUpperCase() + data.type.slice(1) : 'Message'} Preview` },
       blocks: [
-        { type: 'section', text: { type: 'mrkdwn', text: '*Step 2: Preview Your Message*' }},
+        { 
+          type: 'header', 
+          text: { 
+            type: 'plain_text', 
+            text: 'Step 2: Preview Your Message' 
+          }
+        },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `Here's how your *${data.type || 'message'}* will look when posted:`
+          }
+        },
         previewBlock,
         { type: 'divider' },
         {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: '*Ready to continue?* You can go back to edit or proceed to scheduling.'
+          }
+        },
+        {
           type: 'actions',
           elements: [
-            { type: 'button', text: { type: 'plain_text', text: '← Back to Edit' }, action_id: `nav_${data.type || 'custom'}` },
-            { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Continue to Send/Schedule' }, action_id: 'nav_schedule' }
+            { 
+              type: 'button', 
+              text: { type: 'plain_text', text: '← Edit Message' }, 
+              action_id: `nav_${data.type || 'custom'}` 
+            },
+            { 
+              type: 'button', 
+              style: 'primary', 
+              text: { type: 'plain_text', text: 'Continue to Send/Schedule' }, 
+              action_id: 'nav_schedule' 
+            }
           ]
         }
       ]
@@ -372,11 +556,23 @@ function createModal(page, data = {}) {
   // SCHEDULE PAGE - FIXED VERSION
   if (page === 'schedule') {
     const scheduleBlocks = [
-      { type: 'section', text: { type: 'mrkdwn', text: '*Step 3: Send or Schedule Message*' }},
+      { 
+        type: 'header', 
+        text: { 
+          type: 'plain_text', 
+          text: 'Step 3: Send or Schedule Message' 
+        }
+      },
       { type: 'divider' },
 
       // Channel Selection Section
-      { type: 'section', text: { type: 'mrkdwn', text: '*Where to send:*' }},
+      { 
+        type: 'section', 
+        text: { 
+          type: 'mrkdwn', 
+          text: '*Where to send this message:*' 
+        }
+      },
       {
         type: 'input',
         block_id: 'channel_block',
@@ -409,21 +605,27 @@ function createModal(page, data = {}) {
     // Timing Section
     scheduleBlocks.push(
       { type: 'divider' },
-      { type: 'section', text: { type: 'mrkdwn', text: '*When to send this message:*' }},
+      { 
+        type: 'section', 
+        text: { 
+          type: 'mrkdwn', 
+          text: '*When to send this message:*' 
+        }
+      },
       {
         type: 'actions',
         block_id: 'send_timing_block',
         elements: [
           {
             type: 'button',
-            text: { type: 'plain_text', text: '🐈‍⬛ Post Now' },
+            text: { type: 'plain_text', text: 'Post Now' },
             style: data.scheduleType === 'now' ? 'primary' : undefined,
             action_id: 'timing_now',
             value: 'now'
           },
           {
             type: 'button',
-            text: { type: 'plain_text', text: '🧶 Schedule for Later' },
+            text: { type: 'plain_text', text: 'Schedule for Later' },
             style: data.scheduleType === 'schedule' || !data.scheduleType ? 'primary' : undefined,
             action_id: 'timing_schedule',
             value: 'schedule'
@@ -436,7 +638,13 @@ function createModal(page, data = {}) {
     if (data.scheduleType === 'schedule' || !data.scheduleType) {
       scheduleBlocks.push(
         { type: 'divider' },
-        { type: 'section', text: { type: 'mrkdwn', text: '*Schedule Details:*' }},
+        { 
+          type: 'section', 
+          text: { 
+            type: 'mrkdwn', 
+            text: '*Schedule Details:*' 
+          }
+        },
         
         // FIXED: Use separate input blocks for date/time pickers
         {
@@ -492,11 +700,15 @@ function createModal(page, data = {}) {
       {
         type: 'actions',
         elements: [
-          { type: 'button', text: { type: 'plain_text', text: '← Back to Preview' }, action_id: 'nav_preview' },
+          { 
+            type: 'button', 
+            text: { type: 'plain_text', text: '← Back to Preview' }, 
+            action_id: 'nav_preview' 
+          },
           {
             type: 'button',
             style: 'primary',
-            text: { type: 'plain_text', text: 'Post' },
+            text: { type: 'plain_text', text: 'Post Message' },
             action_id: 'submit_message'
           }
         ]
@@ -513,20 +725,26 @@ function createModal(page, data = {}) {
 
   // FORM PAGES (capacity, poll, help, custom)
   const commonBlocks = [
-    { type: 'section', text: { type: 'mrkdwn', text: `*Step 1: Create Your ${page.charAt(0).toUpperCase() + page.slice(1)} Message*` }},
+    { 
+      type: 'header', 
+      text: { 
+        type: 'plain_text', 
+        text: `✏️ Step 1: Create Your ${page.charAt(0).toUpperCase() + page.slice(1)} Message` 
+      }
+    },
     { type: 'divider' }
   ];
 
   if ((page === 'capacity' || page === 'help') && !data.userModifiedText) {
     const templateInfo = page === 'capacity' ?
-      '_Using default capacity check template. Feel free to customize the message text below._' :
-      '_Using default help button template. Feel free to customize the message text below._';
+      '✨ Using default capacity check template. Feel free to customize the message text below.' :
+      '✨ Using default help button template. Feel free to customize the message text below.';
 
     commonBlocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `${templateInfo}`
+        text: `💡 ${templateInfo}`
       }
     });
   }
@@ -535,25 +753,25 @@ function createModal(page, data = {}) {
     ...(page !== 'capacity' && page !== 'help' ? [{
       type: 'input',
       block_id: 'title_block',
-      label: { type: 'plain_text', text: 'Title (optional)' },
+      label: { type: 'plain_text', text: '📝 Title (optional)' },
       element: {
         type: 'plain_text_input',
         action_id: 'title_input',
         initial_value: data.title || '',
-        placeholder: { type: 'plain_text', text: 'Message title...' }
+        placeholder: { type: 'plain_text', text: 'Enter a catchy title for your message...' }
       },
       optional: true
     }] : []),
     {
       type: 'input',
       block_id: 'text_block',
-      label: { type: 'plain_text', text: 'Message Text' },
+      label: { type: 'plain_text', text: '💬 Message Text' },
       element: {
         type: 'plain_text_input',
         action_id: 'text_input',
         multiline: true,
         initial_value: getInitialTextValue(page, data),
-        placeholder: { type: 'plain_text', text: 'Message content...' }
+        placeholder: { type: 'plain_text', text: 'Enter your message content here...' }
       }
     }
   );
@@ -564,22 +782,28 @@ function createModal(page, data = {}) {
     try {
       commonBlocks.push(
         { type: 'divider' },
-        { type: 'section', text: { type: 'mrkdwn', text: '*Poll Configuration*' }}
+        { 
+          type: 'section', 
+          text: { 
+            type: 'mrkdwn', 
+            text: '⚙️ *Poll Configuration*' 
+          }
+        }
       );
 
       const radioOptions = [
         {
-          text: { type: 'plain_text', text: 'Single Choice', emoji: true },
+          text: { type: 'plain_text', text: '🔘 Single Choice', emoji: true },
           description: { type: 'plain_text', text: 'One selection per person' },
           value: 'single'
         },
         {
-          text: { type: 'plain_text', text: 'Multiple Choice', emoji: true },
+          text: { type: 'plain_text', text: '☑️ Multiple Choice', emoji: true },
           description: { type: 'plain_text', text: 'Multiple selections allowed' },
           value: 'multiple'
         },
         {
-          text: { type: 'plain_text', text: 'Open Discussion', emoji: true },
+          text: { type: 'plain_text', text: '💭 Open Discussion', emoji: true },
           description: { type: 'plain_text', text: 'Thread-based responses' },
           value: 'open'
         }
@@ -598,7 +822,7 @@ function createModal(page, data = {}) {
       commonBlocks.push({
         type: 'section',
         block_id: 'poll_type_section',
-        text: { type: 'mrkdwn', text: 'How should people vote?' },
+        text: { type: 'mrkdwn', text: '🗳️ How should people vote?' },
         accessory: {
           type: 'radio_buttons',
           options: radioOptions,
@@ -610,7 +834,13 @@ function createModal(page, data = {}) {
       if (data.pollType !== 'open') {
         commonBlocks.push(
           { type: 'divider' },
-          { type: 'section', text: { type: 'mrkdwn', text: '*Poll Options*' }}
+          { 
+            type: 'section', 
+            text: { 
+              type: 'mrkdwn', 
+              text: '📋 *Poll Options*' 
+            }
+          }
         );
 
         const options = data.pollOptions ?
@@ -625,7 +855,7 @@ function createModal(page, data = {}) {
           commonBlocks.push({
             type: 'input',
             block_id: `option_${index}_block`,
-            label: { type: 'plain_text', text: `Option ${index + 1}` },
+            label: { type: 'plain_text', text: `${index + 1}️⃣ Option ${index + 1}` },
             element: {
               type: 'plain_text_input',
               action_id: `option_${index}_input`,
@@ -641,7 +871,8 @@ function createModal(page, data = {}) {
         if (options.length < 10) {
           actionElements.push({
             type: 'button',
-            text: { type: 'plain_text', text: 'Add Option', emoji: true },
+            style: 'primary',
+            text: { type: 'plain_text', text: '➕ Add Option', emoji: true },
             action_id: 'add_poll_option',
             value: 'add'
           });
@@ -650,7 +881,7 @@ function createModal(page, data = {}) {
         if (options.length > 2) {
           actionElements.push({
             type: 'button',
-            text: { type: 'plain_text', text: 'Remove Last Option', emoji: true },
+            text: { type: 'plain_text', text: '➖ Remove Last Option', emoji: true },
             action_id: 'remove_poll_option',
             style: 'danger',
             value: 'remove'
@@ -666,12 +897,12 @@ function createModal(page, data = {}) {
 
         const availableSettings = [
           {
-            text: { type: 'mrkdwn', text: '*Show vote counts*' },
+            text: { type: 'mrkdwn', text: '*📊 Show vote counts*' },
             description: { type: 'mrkdwn', text: 'Display number of votes per option' },
             value: 'show_counts'
           },
           {
-            text: { type: 'mrkdwn', text: '*Anonymous voting*' },
+            text: { type: 'mrkdwn', text: '*🕶️ Anonymous voting*' },
             description: { type: 'mrkdwn', text: 'Hide who voted for what' },
             value: 'anonymous'
           }
@@ -680,7 +911,7 @@ function createModal(page, data = {}) {
         const settingsBlock = {
           type: 'section',
           block_id: 'poll_settings_section',
-          text: { type: 'mrkdwn', text: 'Display options:' },
+          text: { type: 'mrkdwn', text: '🎛️ Display options:' },
           accessory: {
             type: 'checkboxes',
             options: availableSettings,
@@ -709,7 +940,7 @@ function createModal(page, data = {}) {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: "_Open discussion polls don't need predefined options. People will respond in the message thread."
+            text: "💡 _Open discussion polls don't need predefined options. People will respond in the message thread._"
           }
         });
       }
@@ -718,7 +949,7 @@ function createModal(page, data = {}) {
       console.error('❌ Error creating poll form:', error);
       commonBlocks.push({
         type: 'section',
-        text: { type: 'mrkdwn', text: 'Poll form error - using fallback. Please try again.' }
+        text: { type: 'mrkdwn', text: '⚠️ Poll form error - using fallback. Please try again.' }
       });
     }
   }
@@ -734,7 +965,7 @@ function createModal(page, data = {}) {
       elements: [
         {
           type: 'button',
-          text: { type: 'plain_text', text: 'Reset to Template' },
+          text: { type: 'plain_text', text: '🔄 Reset to Template', emoji: true },
           action_id: `reset_template_${page}`,
           style: 'danger'
         }
@@ -745,15 +976,24 @@ function createModal(page, data = {}) {
   actionBlocks.push({
     type: 'actions',
     elements: [
-      { type: 'button', text: { type: 'plain_text', text: '← Back' }, action_id: 'nav_menu' },
-      { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Preview Message' }, action_id: 'nav_preview' }
+      { 
+        type: 'button', 
+        text: { type: 'plain_text', text: '← Back to Menu', emoji: true }, 
+        action_id: 'nav_menu' 
+      },
+      { 
+        type: 'button', 
+        style: 'primary', 
+        text: { type: 'plain_text', text: '👀 Preview Message', emoji: true }, 
+        action_id: 'nav_preview' 
+      }
     ]
   });
 
   const finalModal = {
     ...base,
-    title: { type: 'plain_text', text: `${page.charAt(0).toUpperCase() + page.slice(1)} Message` },
-    submit: { type: 'plain_text', text: 'Preview Message' },
+    title: { type: 'plain_text', text: `📝 ${page.charAt(0).toUpperCase() + page.slice(1)} Message` },
+    submit: { type: 'plain_text', text: '👀 Preview Message' },
     blocks: [...commonBlocks, ...actionBlocks]
   };
 
@@ -1917,7 +2157,7 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     const channel = body.channel?.id;
     const messageTs = body.message?.ts;
 
-    console.log(`🗳️ Poll vote received: msgId=${msgId}, optionId=${optionId}, user=${user}`);
+    console.log(`🗳️ Poll vote received: msgId=${msgId}, optionId=${optionId}, user=${user}, messageTs=${messageTs}`);
 
     // Initialize vote tracking
     if (!pollVotes[msgId]) {
@@ -1929,6 +2169,38 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     if (!pollData && messageTs) {
       pollData = activePollMessages.get(messageTs);
     }
+    
+    // If still not found, try to reconstruct basic poll data from the message
+    if (!pollData && body.message?.blocks) {
+      console.log('⚠️ Poll data not found in storage, attempting to reconstruct from message');
+      
+      // Extract options from the message buttons
+      const buttonBlocks = body.message.blocks.filter(block => block.type === 'actions');
+      const extractedOptions = [];
+      
+      buttonBlocks.forEach(block => {
+        block.elements?.forEach(element => {
+          if (element.type === 'button' && element.action_id?.startsWith('poll_vote_')) {
+            extractedOptions.push(element.text.text.replace(/ \(\d+\)$/, '')); // Remove vote counts
+          }
+        });
+      });
+      
+      if (extractedOptions.length > 0) {
+        pollData = {
+          id: msgId,
+          pollOptions: extractedOptions.join('\n'),
+          pollType: 'single', // Default assumption
+          pollSettings: ['show_counts'], // Default to showing counts
+          title: 'Poll',
+          text: ''
+        };
+        
+        // Store for future use
+        activePollMessages.set(messageTs, pollData);
+        console.log('✅ Reconstructed poll data from message');
+      }
+    }
 
     if (!pollData) {
       console.error(`❌ Poll data not found for msgId: ${msgId}`);
@@ -1936,7 +2208,7 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
         await client.chat.postEphemeral({
           channel: channel || user,
           user: user,
-          text: 'Poll not found. This might be an older poll that is no longer active.'
+          text: 'Poll data not found. Please try refreshing or contact an admin if this persists.'
         });
       } catch (e) {
         console.log('Could not send poll not found message.');
@@ -1946,6 +2218,7 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
 
     const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
     console.log(`📊 Poll options:`, options);
+    console.log(`📊 Poll data:`, JSON.stringify(pollData, null, 2));
 
     // Initialize vote tracking for all options
     for (let i = 0; i < options.length; i++) {
@@ -2006,6 +2279,7 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     
   } catch (error) {
     console.error('❌ Poll vote error:', error);
+    console.error('Error stack:', error.stack);
     
     try {
       await client.chat.postEphemeral({
