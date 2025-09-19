@@ -1000,7 +1000,7 @@ scheduledMessages.forEach(msg => {
 // ================================
 
 // Slash command - Entry point
-app.command('/pm', async ({ ack, body, client }) => {
+app.command('/cat', async ({ ack, body, client }) => {
   await ack();
   try {
     await client.views.open({
@@ -1905,7 +1905,7 @@ app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
 // DEBUG COMMANDS
 // ================================
 
-app.command('/pm-debug', async ({ ack, body, client }) => {
+app.command('/cat-debug', async ({ ack, body, client }) => {
   await ack();
 
   const channelId = body.channel_id;
@@ -1970,7 +1970,7 @@ app.command('/pm-debug', async ({ ack, body, client }) => {
   }
 });
 
-app.command('/pm-form-debug', async ({ ack, body, client }) => {
+app.command('/cat-form-debug', async ({ ack, body, client }) => {
   await ack();
 
   const userId = body.user_id;
@@ -2061,7 +2061,7 @@ cron.schedule('0 * * * *', () => {
       });
     }
 
-    console.log('🚀 All systems ready! Use /pm to start.');
+    console.log('🚀 All systems ready! Use /cat to start.');
   } catch (error) {
     console.error('❌ Failed to start app:', error);
     process.exit(1);
