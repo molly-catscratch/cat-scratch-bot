@@ -1564,180 +1564,114 @@ app.action('poll_settings_checkboxes', async ({ ack, body, client }) => {
 });
 
 // ================================
-// MODAL SUBMISSION HANDLER - COMPLETELY FIXED
+// MODAL SUBMISSION HANDLER - FIXED WITH PROPER VALIDATION
 // ================================
 
 app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
-  await ack();
   console.log('📋 Modal submission received for:', body.view.callback_id);
 
   // Special handling for schedule page submit button
   if (body.view.callback_id === 'scheduler_schedule') {
-    console.log('🚀 Schedule page submit button pressed');
+    console.log('🚀 Schedule page submission starting validation...');
 
     try {
       const userId = body.user.id;
       let data = formData.get(userId) || {};
-
-      console.log('🚀 Submit message triggered (modal submission)');
-      console.log('Initial user data:', JSON.stringify(data, null, 2));
-
-      // Extract current form state from schedule page
       const values = body.view.state.values;
-      console.log('📋 FULL FORM STATE:', JSON.stringify(values, null, 2));
+      
+      console.log('📋 Raw form values received:', JSON.stringify(values, null, 2));
 
-      // FIXED: Update data with current form values using correct block IDs
-      data = {
-        ...data,
-        channel: getFormValue(values, 'channel_block', 'channel_select', 'conversation') || data.channel,
-      };
+      // Extract form values
+      const extractedChannel = getFormValue(values, 'channel_block', 'channel_select', 'conversation');
+      const extractedDate = getFormValue(values, 'date_block', 'date_picker', 'date');
+      const extractedTime = getFormValue(values, 'time_block', 'time_picker', 'time');
+      const extractedRepeat = getFormValue(values, 'repeat_block', 'repeat_select', 'selected');
 
-      // Determine schedule type - check if date/time fields are present
-      const hasDateTimeFields = values?.date_block?.date_picker || values?.time_block?.time_picker;
-      if (!data.scheduleType) {
-        data.scheduleType = hasDateTimeFields ? 'schedule' : 'now';
-      }
+      console.log('📋 Extracted values:', {
+        channel: extractedChannel,
+        date: extractedDate,
+        time: extractedTime,
+        repeat: extractedRepeat
+      });
 
-      console.log(`📅 Schedule type determined: ${data.scheduleType}`);
-      console.log(`📍 Channel extraction result: ${data.channel}`);
-
-      // FIXED: Extract schedule-specific data using correct block IDs
-      if (data.scheduleType === 'schedule' || hasDateTimeFields) {
-        const extractedDate = getFormValue(values, 'date_block', 'date_picker', 'date');
-        const extractedTime = getFormValue(values, 'time_block', 'time_picker', 'time');
-        const extractedRepeat = getFormValue(values, 'repeat_block', 'repeat_select', 'selected');
-
-        data.date = extractedDate || data.date || todayInEST();
-        data.time = extractedTime || data.time || '09:00';
-        data.repeat = extractedRepeat || data.repeat || 'none';
-
-        if (hasDateTimeFields) {
-          data.scheduleType = 'schedule';
-        }
-
-        console.log(`📅 Extracted schedule data - Date: ${data.date}, Time: ${data.time}, Repeat: ${data.repeat}`);
-        console.log(`📅 Raw extraction results - Date: ${extractedDate}, Time: ${extractedTime}, Repeat: ${extractedRepeat}`);
-      }
-
-      // FIXED: Extract alert channels for help messages
-      if (data.type === 'help') {
-        const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
-        console.log(`🚨 Extracted alert channels:`, extractedAlertChannels);
-        data.alertChannels = extractedAlertChannels?.length ? extractedAlertChannels : (data.alertChannels || []);
-        console.log(`🚨 Final alert channels:`, data.alertChannels);
-      }
-
-      console.log('📋 Final submission data:', JSON.stringify(data, null, 2));
-      console.log(`🚀 Final decision: ${data.scheduleType === 'now' ? 'POSTING NOW' : 'SCHEDULING FOR LATER'}`);
-
-      // ================================
-      // VALIDATION
-      // ================================
+      // Build validation errors object
+      const errors = {};
 
       // Channel validation
-      if (!data.channel) {
-        console.error('❌ Validation failed: No channel selected');
-        try {
-          await client.chat.postEphemeral({
-            channel: body.user.id,
-            user: userId,
-            text: `Please select a channel first.${cat()}`
-          });
-        } catch (e) {
-          console.log('Could not send ephemeral (channel may be invalid).');
-        }
-        return;
+      if (!extractedChannel && !data.channel) {
+        errors['channel_block'] = 'Please select a channel to post the message';
       }
 
-      // Content validation
-      if (!data.text && !data.title) {
-        console.error('❌ Validation failed: No content');
-        try {
-          await client.chat.postEphemeral({
-            channel: body.user.id,
-            user: userId,
-            text: `Please add some content to your message.${cat()}`
-          });
-        } catch (e) {
-          console.log('Could not send ephemeral content error.');
-        }
-        return;
-      }
-
-      // Validate channel exists and bot has access
-      try {
-        console.log(`🔍 Validating channel access: ${data.channel}`);
-        const channelInfo = await client.conversations.info({ channel: data.channel });
-        console.log('✅ Channel validation successful:', channelInfo.channel.name);
-      } catch (channelError) {
-        console.error('❌ Channel validation failed:', channelError?.data?.error);
-
-        let errorMessage = `Cannot access the selected channel.${cat()}`;
-        if (channelError?.data?.error === 'channel_not_found') {
-          errorMessage = `Channel not found. Please select a valid channel.${cat()}`;
-        } else if (channelError?.data?.error === 'not_in_channel') {
-          errorMessage = `I need to be invited to that channel first! Use \`/invite @your-bot-name\` in the target channel.${cat()}`;
-        }
-
-        try {
-          await client.chat.postEphemeral({
-            channel: body.user.id,
-            user: userId,
-            text: errorMessage
-          });
-        } catch (e) {
-          console.log('Could not post ephemeral channel error.');
-        }
-        return;
-      }
-
-      // Poll validation
-      if (data.type === 'poll') {
-        const options = (data.pollOptions || '').split('\n').filter(opt => opt.trim()).length;
-        if (data.pollType !== 'open' && options < 2) {
-          console.error('❌ Poll validation failed: insufficient options');
-          try {
-            await client.chat.postEphemeral({
-              channel: body.user.id,
-              user: userId,
-              text: `Please provide at least 2 poll options.${cat()}`
-            });
-          } catch (e) {
-            console.log('Could not send ephemeral poll error.');
-          }
-          return;
-        }
-      }
-
-      // Help message validation
+      // Help message specific validation
       if (data.type === 'help') {
-        console.log(`🚨 Help validation - alertChannels:`, data.alertChannels);
-        if (!data.alertChannels || data.alertChannels.length === 0) {
-          console.error('❌ Help validation failed: no alert channels');
-          try {
-            await client.chat.postEphemeral({
-              channel: body.user.id,
-              user: userId,
-              text: `Please select at least one alert channel for help notifications.${cat()}`
-            });
-          } catch (e) {
-            console.log('Could not send ephemeral help validation error.');
-          }
-          return;
+        const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
+        console.log('🚨 Help validation - extracted alert channels:', extractedAlertChannels);
+        
+        if (!extractedAlertChannels?.length && (!data.alertChannels || data.alertChannels.length === 0)) {
+          errors['alert_channels_block'] = 'Please select at least one alert channel for help notifications';
         }
       }
 
-      // Generate ID if not editing
+      // Schedule validation - only if scheduling for later
+      const scheduleType = data.scheduleType || 'schedule';
+      if (scheduleType === 'schedule') {
+        if (!extractedDate && !data.date) {
+          errors['date_block'] = 'Please select a date for scheduling';
+        }
+        if (!extractedTime && !data.time) {
+          errors['time_block'] = 'Please select a time for scheduling';
+        }
+        
+        // Check if scheduled time is in the past
+        const finalDate = extractedDate || data.date || todayInEST();
+        const finalTime = extractedTime || data.time || '09:00';
+        const finalRepeat = extractedRepeat || data.repeat || 'none';
+        
+        if (finalRepeat === 'none' && isDateTimeInPast(finalDate, finalTime)) {
+          errors['time_block'] = `Cannot schedule in the past. Current time: ${currentTimeInEST()} EST`;
+        }
+      }
+
+      // If there are validation errors, return them to display in the modal
+      if (Object.keys(errors).length > 0) {
+        console.log('❌ Validation errors found:', errors);
+        await ack({
+          response_action: 'errors',
+          errors: errors
+        });
+        return;
+      }
+
+      // If validation passes, acknowledge and process
+      await ack();
+      console.log('✅ Modal validation passed, processing submission...');
+
+      // Update data with extracted values
+      data = {
+        ...data,
+        channel: extractedChannel || data.channel,
+        date: extractedDate || data.date || todayInEST(),
+        time: extractedTime || data.time || '09:00',
+        repeat: extractedRepeat || data.repeat || 'none'
+      };
+
+      // Handle help message alert channels
+      if (data.type === 'help') {
+        const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
+        data.alertChannels = extractedAlertChannels || data.alertChannels || [];
+      }
+
+      console.log('📋 Final processed data:', JSON.stringify(data, null, 2));
+
+      // Generate ID if needed
       if (!data.id) {
         data.id = generateId();
-        console.log('🆔 Generated new ID:', data.id);
       }
 
-      // ================================
-      // PROCESSING
-      // ================================
-
-      if (data.scheduleType === 'now') {
+      // Determine final action
+      const finalScheduleType = data.scheduleType || 'schedule';
+      
+      if (finalScheduleType === 'now') {
         // POST NOW
         console.log('📤 Posting message immediately...');
         const success = await sendMessage(data);
@@ -1746,6 +1680,7 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
           `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message posted to <#${data.channel}>!${cat()}` :
           `Failed to post message. Please check that I'm invited to <#${data.channel}>.${cat()}`;
 
+        // Send result to user
         try {
           await client.chat.postEphemeral({
             channel: body.user.id,
@@ -1753,32 +1688,14 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
             text: resultMessage
           });
         } catch (e) {
-          console.log('Could not send ephemeral post result.');
+          console.log('Could not send ephemeral result message.');
         }
 
-        console.log(`${success ? '✅' : '❌'} Immediate post result: ${success}`);
       } else {
         // SCHEDULE FOR LATER
         console.log('⏰ Scheduling message for later...');
-        console.log(`⏰ Schedule data - Date: ${data.date}, Time: ${data.time}, Repeat: ${data.repeat}`);
-
-        // Time validation for scheduled messages
-        if (data.repeat === 'none' && isDateTimeInPast(data.date, data.time)) {
-          console.error('❌ Validation failed: Time is in the past');
-          console.log(`❌ Past time check - Requested: ${data.date} ${data.time}, Current: ${todayInEST()} ${currentTimeInEST()}`);
-          try {
-            await client.chat.postEphemeral({
-              channel: body.user.id,
-              user: userId,
-              text: `Cannot schedule messages in the past. Current time: ${currentTimeInEST()} EST${cat()}`
-            });
-          } catch (e) {
-            console.log('Could not send ephemeral past time error.');
-          }
-          return;
-        }
-
-        // Add or update scheduled message
+        
+        // Add to scheduled messages
         const existingIndex = scheduledMessages.findIndex(m => m.id === data.id);
         if (existingIndex >= 0) {
           scheduledMessages[existingIndex] = data;
@@ -1793,6 +1710,7 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
 
         const successMessage = `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`;
 
+        // Send confirmation to user
         try {
           await client.chat.postEphemeral({
             channel: body.user.id,
@@ -1800,21 +1718,27 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
             text: successMessage
           });
         } catch (e) {
-          console.log('Could not post ephemeral scheduling success.');
+          console.log('Could not send ephemeral scheduling confirmation.');
         }
-
-        console.log('✅ Message scheduled successfully');
       }
 
-      // Clear user form data after successful submission
+      // Clean up form data
       formData.delete(userId);
-      console.log('🧹 Cleared user form data after submission');
+      console.log('🧹 Cleaned up user form data after successful submission');
 
     } catch (error) {
-      console.error('❌ Error handling scheduler_schedule submit:', error);
-      console.error('Error details:', error.message);
-      console.error('Error stack:', error.stack);
+      // If there's any error during processing, acknowledge with error
+      console.error('❌ Error during modal processing:', error);
+      await ack({
+        response_action: 'errors',
+        errors: {
+          'channel_block': 'An error occurred processing your request. Please try again.'
+        }
+      });
     }
+  } else {
+    // Handle other modal types with simple acknowledgment
+    await ack();
   }
 });
 
