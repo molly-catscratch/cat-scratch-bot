@@ -31,6 +31,7 @@ let scheduledMessages = [];
 const jobs = new Map();
 const pollVotes = {};
 const formData = new Map(); // Store form data for navigation
+const activePollMessages = new Map(); // Store sent poll messages by their Slack timestamp
 
 function saveMessages() {
   try {
@@ -764,6 +765,110 @@ function createModal(page, data = {}) {
 // MESSAGE SENDING
 // ================================
 
+// ================================
+// MESSAGE SENDING
+// ================================
+
+// Function to update poll message with current vote counts
+async function updatePollMessage(client, channel, messageTs, pollData, votes) {
+  try {
+    console.log(`🔄 Updating poll message in ${channel} at ${messageTs}`);
+    
+    const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
+    const showCounts = pollData.pollSettings?.includes('show_counts') || false;
+    const anonymous = pollData.pollSettings?.includes('anonymous') || false;
+    
+    // Build updated blocks
+    let blocks = [
+      { 
+        type: 'section', 
+        text: { 
+          type: 'mrkdwn', 
+          text: `*${pollData.title || 'Poll'}*${cat()}\n${pollData.text || ''}` 
+        }
+      }
+    ];
+
+    if (pollData.pollType !== 'open' && options.length > 0) {
+      const buttonElements = options.map((option, idx) => {
+        let buttonText = option.slice(0, 70);
+        
+        // Add vote count to button text if enabled
+        if (showCounts && votes[idx]) {
+          const count = votes[idx].size;
+          buttonText += ` (${count})`;
+        }
+        
+        return {
+          type: 'button',
+          text: { type: 'plain_text', text: buttonText },
+          action_id: `poll_vote_${pollData.id}_${idx}`,
+          value: `${idx}`
+        };
+      });
+
+      // Add button rows (max 5 buttons per row)
+      for (let i = 0; i < buttonElements.length; i += 5) {
+        blocks.push({
+          type: 'actions',
+          block_id: `poll_${pollData.id}_${i}`,
+          elements: buttonElements.slice(i, i + 5)
+        });
+      }
+      
+      // Add vote summary section if showing counts and not anonymous
+      if (showCounts && !anonymous) {
+        let voteSummary = '';
+        options.forEach((option, idx) => {
+          if (votes[idx] && votes[idx].size > 0) {
+            const voters = Array.from(votes[idx]).map(userId => `<@${userId}>`).join(', ');
+            voteSummary += `*${option}*: ${voters}\n`;
+          }
+        });
+        
+        if (voteSummary) {
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `*Votes:*\n${voteSummary}`
+            }
+          });
+        }
+      }
+    }
+
+    // Context with voting instructions
+    let contextText = pollData.pollType === 'single' ? '_Click to vote. Click again to unvote._' :
+      pollData.pollType === 'multiple' ? '_Click to vote (multiple choices). Click again to unvote._' :
+      '_Open-ended poll. Use thread replies to respond._';
+      
+    // Add total vote count to context if showing counts
+    if (showCounts && pollData.pollType !== 'open') {
+      const totalVotes = Object.values(votes).reduce((sum, voteSet) => sum + voteSet.size, 0);
+      contextText += ` • Total votes: ${totalVotes}`;
+    }
+
+    blocks.push({ 
+      type: 'context', 
+      elements: [{ type: 'mrkdwn', text: contextText }]
+    });
+
+    // Update the message
+    await client.chat.update({
+      channel: channel,
+      ts: messageTs,
+      text: pollData.title || 'Poll',
+      blocks: blocks
+    });
+    
+    console.log(`✅ Poll message updated successfully`);
+    
+  } catch (error) {
+    console.error('❌ Failed to update poll message:', error);
+  }
+}
+
 async function sendMessage(msg) {
   try {
     console.log(`🐈‍⬛ Attempting to send ${msg.type} message to channel: ${msg.channel}`);
@@ -816,9 +921,18 @@ async function sendMessage(msg) {
         }
       }
     } else if (msg.type === 'poll') {
-      console.log('📤 Sending poll message...');
+      console.log('📤 Sending enhanced poll message...');
       const options = (msg.pollOptions || '').split('\n').map(s => s.trim()).filter(Boolean);
       console.log('Poll options:', options);
+
+      // Initialize vote tracking
+      if (!pollVotes[msg.id]) {
+        pollVotes[msg.id] = {};
+        // Initialize empty vote sets for all options
+        for (let i = 0; i < options.length; i++) {
+          pollVotes[msg.id][i] = new Set();
+        }
+      }
 
       let blocks = [
         { type: 'section', text: { type: 'mrkdwn', text: `*${msg.title || 'Poll'}*${cat()}\n${msg.text || ''}` }}
@@ -845,9 +959,17 @@ async function sendMessage(msg) {
         msg.pollType === 'multiple' ? '_Click to vote (multiple choices). Click again to unvote._' :
         '_Open-ended poll. Use thread replies to respond._';
 
+      // Add settings info to context
+      if (msg.pollSettings?.includes('show_counts')) {
+        contextText += ' • Vote counts: ON';
+      }
+      if (msg.pollSettings?.includes('anonymous')) {
+        contextText += ' • Anonymous voting: ON';
+      }
+
       blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: contextText }]});
 
-      console.log('Poll blocks:', JSON.stringify(blocks, null, 2));
+      console.log('Enhanced poll blocks:', JSON.stringify(blocks, null, 2));
 
       const result = await app.client.chat.postMessage({
         channel: msg.channel,
@@ -855,7 +977,13 @@ async function sendMessage(msg) {
         blocks
       });
 
-      console.log('📬 Poll message result:', result);
+      // Store poll metadata for later updates
+      if (result.ok && result.ts) {
+        activePollMessages.set(result.ts, msg);
+        console.log(`📋 Stored poll metadata for message ${result.ts}`);
+      }
+
+      console.log('📬 Enhanced poll message result:', result);
 
     } else if (msg.type === 'help') {
       console.log('📤 Sending help button message...');
@@ -1780,21 +1908,44 @@ app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
 // INTERACTIVE MESSAGE HANDLERS
 // ================================
 
-// Poll voting
+// Enhanced poll voting handler with visual feedback
 app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
   await ack();
   try {
     const [, , msgId, optionId] = action.action_id.split('_');
     const user = body.user.id;
+    const channel = body.channel?.id;
+    const messageTs = body.message?.ts;
 
+    console.log(`🗳️ Poll vote received: msgId=${msgId}, optionId=${optionId}, user=${user}`);
+
+    // Initialize vote tracking
     if (!pollVotes[msgId]) {
       pollVotes[msgId] = {};
     }
 
-    const msg = scheduledMessages.find(m => m.id === msgId);
-    if (!msg) return;
+    // Find poll data - check both scheduled messages and active polls
+    let pollData = scheduledMessages.find(m => m.id === msgId);
+    if (!pollData && messageTs) {
+      pollData = activePollMessages.get(messageTs);
+    }
 
-    const options = (msg.pollOptions || '').split('\n').filter(Boolean);
+    if (!pollData) {
+      console.error(`❌ Poll data not found for msgId: ${msgId}`);
+      try {
+        await client.chat.postEphemeral({
+          channel: channel || user,
+          user: user,
+          text: 'Poll not found. This might be an older poll that is no longer active.'
+        });
+      } catch (e) {
+        console.log('Could not send poll not found message.');
+      }
+      return;
+    }
+
+    const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
+    console.log(`📊 Poll options:`, options);
 
     // Initialize vote tracking for all options
     for (let i = 0; i < options.length; i++) {
@@ -1803,38 +1954,72 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
       }
     }
 
-    const pollType = msg.pollType || 'single';
+    const pollType = pollData.pollType || 'single';
+    let userVoteChanged = false;
 
     if (pollType === 'single') {
-      // Remove user from all other options first
+      // Single choice: remove from all options first, then add to selected
+      const wasVotedHere = pollVotes[msgId][optionId].has(user);
+      
+      // Remove user from all options
       Object.values(pollVotes[msgId]).forEach(set => set.delete(user));
-      pollVotes[msgId][optionId].add(user);
-    } else if (pollType === 'multiple') {
-      // Toggle vote for this option only
-      if (pollVotes[msgId][optionId].has(user)) {
-        pollVotes[msgId][optionId].delete(user);
-      } else {
+      
+      // If they weren't already voted here, add their vote
+      if (!wasVotedHere) {
         pollVotes[msgId][optionId].add(user);
       }
+      userVoteChanged = true;
+      
+    } else if (pollType === 'multiple') {
+      // Multiple choice: toggle vote for this option only
+      if (pollVotes[msgId][optionId].has(user)) {
+        pollVotes[msgId][optionId].delete(user);
+        console.log(`➖ Removed vote from option ${optionId}`);
+      } else {
+        pollVotes[msgId][optionId].add(user);
+        console.log(`➕ Added vote to option ${optionId}`);
+      }
+      userVoteChanged = true;
     }
 
+    // Update the poll message with new vote counts if we have the message timestamp
+    if (userVoteChanged && messageTs && channel) {
+      await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
+    }
+
+    // Send confirmation to user
     try {
-      await app.client.chat.postEphemeral({
-        channel: body.channel?.id || (msg.channel || user),
+      const voteStatus = pollType === 'single' ? 
+        (pollVotes[msgId][optionId].has(user) ? 'Vote recorded' : 'Vote removed') :
+        (pollVotes[msgId][optionId].has(user) ? 'Vote added' : 'Vote removed');
+        
+      await client.chat.postEphemeral({
+        channel: channel || user,
         user: user,
-        text: `Vote recorded${cat()}`
+        text: `${voteStatus}! ${cat()}`
       });
     } catch (epErr) {
-      console.log('Could not send ephemeral vote confirmation (might be DM or unsupported).');
+      console.log('Could not send ephemeral vote confirmation.');
     }
 
-    console.log(`🗳️ ${user} voted on poll ${msgId}, option ${optionId}`);
+    console.log(`✅ Vote processed for user ${user} on poll ${msgId}`);
+    
   } catch (error) {
-    console.error('Poll vote error:', error);
+    console.error('❌ Poll vote error:', error);
+    
+    try {
+      await client.chat.postEphemeral({
+        channel: body.channel?.id || body.user.id,
+        user: body.user.id,
+        text: 'There was an error processing your vote. Please try again.'
+      });
+    } catch (e) {
+      console.log('Could not send error message to user.');
+    }
   }
 });
 
-// Help button clicks
+// Help button clicks - UPDATED TO FIX DUPLICATE NOTIFICATIONS
 app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
   await ack();
   try {
@@ -1885,17 +2070,20 @@ app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
       console.log('Could not post ephemeral confirmation (channel missing).');
     }
 
-    if (successCount > 0 && channel) {
-      try {
-        await client.chat.postMessage({
-          channel,
-          text: `🚨 <@${user}> has hit the help button${cat()}`
-        });
-        console.log(`🆘 Backup request from ${user} sent to ${successCount}/${alertChannels.length} channels`);
-      } catch (e) {
-        console.log('Could not post help confirmation in original channel (maybe missing permissions).');
-      }
-    }
+    // REMOVED: Duplicate message to original channel - this was causing unwanted notifications
+    // if (successCount > 0 && channel) {
+    //   try {
+    //     await client.chat.postMessage({
+    //       channel,
+    //       text: `🚨 <@${user}> has hit the help button${cat()}`
+    //     });
+    //     console.log(`🆘 Backup request from ${user} sent to ${successCount}/${alertChannels.length} channels`);
+    //   } catch (e) {
+    //     console.log('Could not post help confirmation in original channel (maybe missing permissions).');
+    //   }
+    // }
+
+    console.log(`🆘 Backup request from ${user} sent to ${successCount}/${alertChannels.length} alert channels`);
   } catch (error) {
     console.error('Help button error:', error);
   }
