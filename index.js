@@ -1671,13 +1671,9 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     const user = body.user.id;
     const channel = body.channel?.id;
     const messageTs = body.message?.ts;
+    const optionIndex = parseInt(optionId);
 
     console.log(`Poll vote received: msgId=${msgId}, optionId=${optionId}, user=${user}, messageTs=${messageTs}`);
-
-    // Initialize vote tracking if needed
-    if (!pollVotes[msgId]) {
-      pollVotes[msgId] = {};
-    }
 
     // Find poll data
     let pollData = scheduledMessages.find(m => m.id === msgId);
@@ -1732,35 +1728,64 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
     console.log(`Poll options:`, options);
 
-    // Initialize vote tracking for all options
+    // CRITICAL FIX: Initialize vote tracking completely
+    if (!pollVotes[msgId]) {
+      pollVotes[msgId] = {};
+    }
+
+    // Ensure ALL option indices exist as Sets
     for (let i = 0; i < options.length; i++) {
       if (!pollVotes[msgId][i]) {
         pollVotes[msgId][i] = new Set();
       }
     }
 
+    // Validate option index
+    if (optionIndex < 0 || optionIndex >= options.length) {
+      console.error(`Invalid option index: ${optionIndex} for poll with ${options.length} options`);
+      try {
+        await client.chat.postEphemeral({
+          channel: channel || user,
+          user: user,
+          text: 'Invalid poll option. Please try again.'
+        });
+      } catch (e) {
+        console.log('Could not send invalid option message.');
+      }
+      return;
+    }
+
+    // Double-check that the specific option exists
+    if (!pollVotes[msgId][optionIndex]) {
+      pollVotes[msgId][optionIndex] = new Set();
+    }
+
     const pollType = pollData.pollType || 'single';
     let userVoteChanged = false;
 
     if (pollType === 'single') {
-      const wasVotedHere = pollVotes[msgId][optionId].has(user);
+      const wasVotedHere = pollVotes[msgId][optionIndex].has(user);
       
       // Remove user from all options
-      Object.values(pollVotes[msgId]).forEach(set => set.delete(user));
+      Object.values(pollVotes[msgId]).forEach(set => {
+        if (set && typeof set.delete === 'function') {
+          set.delete(user);
+        }
+      });
       
       // If they weren't already voted here, add their vote
       if (!wasVotedHere) {
-        pollVotes[msgId][optionId].add(user);
+        pollVotes[msgId][optionIndex].add(user);
       }
       userVoteChanged = true;
       
     } else if (pollType === 'multiple') {
-      if (pollVotes[msgId][optionId].has(user)) {
-        pollVotes[msgId][optionId].delete(user);
-        console.log(`Removed vote from option ${optionId}`);
+      if (pollVotes[msgId][optionIndex].has(user)) {
+        pollVotes[msgId][optionIndex].delete(user);
+        console.log(`Removed vote from option ${optionIndex}`);
       } else {
-        pollVotes[msgId][optionId].add(user);
-        console.log(`Added vote to option ${optionId}`);
+        pollVotes[msgId][optionIndex].add(user);
+        console.log(`Added vote to option ${optionIndex}`);
       }
       userVoteChanged = true;
     }
@@ -1773,13 +1798,13 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     // Send confirmation to user
     try {
       const voteStatus = pollType === 'single' ? 
-        (pollVotes[msgId][optionId].has(user) ? 'Vote recorded' : 'Vote removed') :
-        (pollVotes[msgId][optionId].has(user) ? 'Vote added' : 'Vote removed');
+        (pollVotes[msgId][optionIndex].has(user) ? 'Vote recorded' : 'Vote removed') :
+        (pollVotes[msgId][optionIndex].has(user) ? 'Vote added' : 'Vote removed');
         
       await client.chat.postEphemeral({
         channel: channel || user,
         user: user,
-        text: `${voteStatus}!${cat()}`
+        text: `${voteStatus}!`
       });
     } catch (epErr) {
       console.log('Could not send ephemeral vote confirmation.');
@@ -1789,6 +1814,7 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     
   } catch (error) {
     console.error('Poll vote error:', error);
+    console.error('Error stack:', error.stack);
     
     try {
       await client.chat.postEphemeral({
