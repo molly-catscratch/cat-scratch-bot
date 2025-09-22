@@ -240,11 +240,6 @@ function createModal(page, data = {}) {
               style: 'primary',
               text: { type: 'plain_text', text: 'Capacity Check' }, 
               action_id: 'nav_capacity' 
-            },
-            { 
-              type: 'button', 
-              text: { type: 'plain_text', text: 'Poll' }, 
-              action_id: 'nav_poll' 
             }
           ]
         },
@@ -870,12 +865,15 @@ async function sendMessage(msg) {
         const reactions = ['green_circle', 'yellow_circle', 'orange_circle', 'red_circle'];
         for (const reaction of reactions) {
           try {
-            await new Promise(resolve => setTimeout(resolve, 100));
             await app.client.reactions.add({
               channel: msg.channel,
               timestamp: result.ts,
-              name: reaction
-            });
+              name: 'black_cat'
+  });
+} catch (e) {
+  console.error('Reaction failed for :black_cat::', e?.data?.error || e?.message);
+}
+
           } catch (e) {
             console.error(`Reaction failed for ${reaction}:`, e?.data?.error || e?.message);
           }
@@ -1034,9 +1032,7 @@ async function sendMessage(msg) {
 
 function scheduleJob(msg) {
   if (jobs.has(msg.id)) {
-    try {
-      jobs.get(msg.id).destroy();
-    } catch (_) {}
+    try { jobs.get(msg.id).destroy(); } catch (_) {}
     jobs.delete(msg.id);
   }
 
@@ -1044,13 +1040,21 @@ function scheduleJob(msg) {
   let cronExpr;
 
   if (msg.repeat === 'daily') {
-    cronExpr = `${mm} ${hh} * * *`;
+    // Weekdays only (Mon–Fri)
+    cronExpr = `${mm} ${hh} * * 1-5`;
   } else if (msg.repeat === 'weekly') {
     const day = new Date(msg.date).getDay();
-    cronExpr = `${mm} ${hh} * * ${day}`;
+    // Only allow Mon–Fri
+    if (day >= 1 && day <= 5) {
+      cronExpr = `${mm} ${hh} * * ${day}`;
+    } else {
+      console.log(`Weekly schedule skipped (weekend): ${msg.id}`);
+      return;
+    }
   } else if (msg.repeat === 'monthly') {
     const day = msg.date.split('-')[2];
-    cronExpr = `${mm} ${hh} ${day} * *`;
+    // Run only Mon–Fri
+    cronExpr = `${mm} ${hh} ${day} * 1-5`;
   } else {
     const [y, mon, d] = msg.date.split('-');
     cronExpr = `${mm} ${hh} ${d} ${mon} *`;
@@ -1063,23 +1067,14 @@ function scheduleJob(msg) {
     if (msg.repeat === 'none') {
       scheduledMessages = scheduledMessages.filter(m => m.id !== msg.id);
       saveMessages();
-      try {
-        job.destroy();
-      } catch (_) {}
+      try { job.destroy(); } catch (_) {}
       jobs.delete(msg.id);
     }
-  }, {
-    timezone: 'America/New_York'
-  });
+  }, { timezone: 'America/New_York' });
 
   jobs.set(msg.id, job);
 }
 
-scheduledMessages.forEach(msg => {
-  if (msg.repeat !== 'none' || !isDateTimeInPast(msg.date, msg.time)) {
-    scheduleJob(msg);
-  }
-});
 
 // ================================
 // HANDLERS
