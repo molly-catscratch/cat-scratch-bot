@@ -860,23 +860,16 @@ async function sendMessage(msg) {
         channel: msg.channel,
         text: messageText
       });
-
+    
       if (result.ok && result.ts) {
-        const reactions = ['green_circle', 'yellow_circle', 'orange_circle', 'red_circle'];
-        for (const reaction of reactions) {
-          try {
-            await app.client.reactions.add({
-              channel: msg.channel,
-              timestamp: result.ts,
-              name: 'black_cat'
-  });
-} catch (e) {
-  console.error('Reaction failed for :black_cat::', e?.data?.error || e?.message);
-}
-
-          } catch (e) {
-            console.error(`Reaction failed for ${reaction}:`, e?.data?.error || e?.message);
-          }
+        try {
+          await app.client.reactions.add({
+            channel: msg.channel,
+            timestamp: result.ts,
+            name: 'black_cat' // custom emoji :black_cat:
+          });
+        } catch (e) {
+          console.error('Reaction failed for :black_cat::', e?.data?.error || e?.message);
         }
       }
     } else if (msg.type === 'poll') {
