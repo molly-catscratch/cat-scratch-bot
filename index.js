@@ -779,20 +779,6 @@ function createModal(page, data = {}) {
     try {
       commonBlocks.push(
         { type: 'divider' },
-        { 
-          type: 'section', 
-          text: { 
-            type: 'mrkdwn', 
-            text: '*Poll Configuration*' 
-          }
-        },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*How should people vote?*'
-          }
-        },
         {
           type: 'input',
           block_id: 'poll_type_section',
@@ -801,11 +787,11 @@ function createModal(page, data = {}) {
             type: 'radio_buttons',
             action_id: 'poll_type_radio',
             initial_option: data.pollType === 'single' ?
-              { text: { type: 'plain_text', text: '🔘 Single choice - voters pick one option' }, value: 'single' } :
-              { text: { type: 'plain_text', text: '🔲 Multiple choice - voters can pick several options' }, value: 'multiple' },
+              { text: { type: 'plain_text', text: 'Single choice - voters pick one option' }, value: 'single' } :
+              { text: { type: 'plain_text', text: 'Multiple choice - voters can pick several options' }, value: 'multiple' },
             options: [
-              { text: { type: 'plain_text', text: '🔘 Single choice - voters pick one option' }, value: 'single' },
-              { text: { type: 'plain_text', text: '🔲 Multiple choice - voters can pick several options' }, value: 'multiple' }
+              { text: { type: 'plain_text', text: 'Single choice - voters pick one option' }, value: 'single' },
+              { text: { type: 'plain_text', text: 'Multiple choice - voters can pick several options' }, value: 'multiple' }
             ]
           }
         },
@@ -820,17 +806,17 @@ function createModal(page, data = {}) {
               initial_options: data.pollSettings.filter(setting => setting !== 'anonymous').map(setting => ({
                 text: { 
                   type: 'plain_text', 
-                  text: setting === 'hidden' ? '👁️‍🗨️ Hide results until poll closes' :
-                        setting === 'limited' ? '📊 Limit votes per person' :
-                        setting === 'allow_add' ? '➕ Let others add options' : setting
+                  text: setting === 'hidden' ? 'Hide results until poll closes' :
+                        setting === 'limited' ? 'Limit votes per person' :
+                        setting === 'allow_add' ? 'Let others add options' : setting
                 },
                 value: setting
               }))
             } : {}),
             options: [
-              { text: { type: 'plain_text', text: '👁️‍🗨️ Hide results until poll closes' }, value: 'hidden' },
-              { text: { type: 'plain_text', text: '📊 Limit votes per person' }, value: 'limited' },
-              { text: { type: 'plain_text', text: '➕ Let others add options' }, value: 'allow_add' }
+              { text: { type: 'plain_text', text: 'Hide results until poll closes' }, value: 'hidden' },
+              { text: { type: 'plain_text', text: 'Limit votes per person' }, value: 'limited' },
+              { text: { type: 'plain_text', text: 'Let others add options' }, value: 'allow_add' }
             ]
           },
           optional: true
@@ -860,7 +846,7 @@ function createModal(page, data = {}) {
           type: 'section', 
           text: { 
             type: 'mrkdwn', 
-            text: '*Poll Options*\nAdd 2-10 options for people to vote on:' 
+            text: '*Poll Options*' 
           }
         }
       );
@@ -878,7 +864,7 @@ function createModal(page, data = {}) {
         commonBlocks.push({
           type: 'input',
           block_id: `option_${index}_block`,
-          label: { type: 'plain_text', text: `${index + 1}.` },
+          label: { type: 'plain_text', text: `Option ${index + 1}` },
           element: {
             type: 'plain_text_input',
             action_id: `option_${index}_input`,
@@ -896,7 +882,7 @@ function createModal(page, data = {}) {
         actionElements.push({
           type: 'button',
           style: 'primary',
-          text: { type: 'plain_text', text: '➕ Add Option' },
+          text: { type: 'plain_text', text: 'Add Option' },
           action_id: 'add_poll_option',
           value: 'add'
         });
@@ -905,7 +891,7 @@ function createModal(page, data = {}) {
       if (options.length > 2) {
         actionElements.push({
           type: 'button',
-          text: { type: 'plain_text', text: '➖ Remove Last' },
+          text: { type: 'plain_text', text: 'Remove Last' },
           action_id: 'remove_poll_option',
           style: 'danger',
           value: 'remove'
@@ -917,30 +903,6 @@ function createModal(page, data = {}) {
           type: 'actions',
           elements: actionElements
         });
-      }
-
-      // Preview section
-      if (data.pollOptions && data.pollOptions.trim()) {
-        const previewOptions = data.pollOptions.split('\n').filter(o => o.trim());
-        if (previewOptions.length >= 2) {
-          commonBlocks.push(
-            { type: 'divider' },
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: '*Preview:*'
-              }
-            },
-            {
-              type: 'section',
-              text: {
-                type: 'mrkdwn',
-                text: `*${data.title || 'Poll Question'}*\n${data.text || ''}\n\n${previewOptions.map((opt, i) => `${i + 1}. ${opt}`).join('\n')}\n\n_${data.pollType === 'single' ? '🔘 Single choice' : '🔲 Multiple choice'} poll_`
-              }
-            }
-          );
-        }
       }
 
     } catch (error) {
@@ -1925,23 +1887,23 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
     let data = formData.get(userId) || {};
     const values = body.view.state.values;
 
+    // Extract all current options from the form
     let options = [];
     let index = 0;
     while (values[`option_${index}_block`]) {
-      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
-      if (optionValue) options.push(optionValue);
+      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
+      options.push(optionValue || '');
       index++;
     }
 
-    // Ensure current options are saved
-    while (options.length < index) {
-      options.push('');
-    }
-    
-    options.push(''); // Add new empty option
+    // Add one more empty option
+    options.push('');
 
+    // Update form data
     data.pollOptions = options.join('\n');
     formData.set(userId, data);
+
+    console.log('Adding poll option. New options:', options);
 
     await client.views.update({
       view_id: body.view.id,
@@ -1959,20 +1921,25 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
     let data = formData.get(userId) || {};
     const values = body.view.state.values;
 
+    // Extract all current options from the form
     let options = [];
     let index = 0;
     while (values[`option_${index}_block`]) {
-      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
-      if (optionValue) options.push(optionValue);
+      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
+      options.push(optionValue || '');
       index++;
     }
 
+    // Remove the last option if we have more than 2
     if (options.length > 2) {
       options.pop();
     }
 
+    // Update form data
     data.pollOptions = options.join('\n');
     formData.set(userId, data);
+
+    console.log('Removing poll option. New options:', options);
 
     await client.views.update({
       view_id: body.view.id,
