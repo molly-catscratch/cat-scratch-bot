@@ -57,481 +57,11 @@ function loadMessages() {
     try {
       const data = JSON.parse(fs.readFileSync(SCHEDULE_FILE));
       scheduledMessages = data.filter(msg => {
-        if (!data.id) {
-        data.id = generateId();
-      }
-
-      const finalScheduleType = data.scheduleType || 'schedule';
-
-      if (finalScheduleType === 'now') {
-        const success = await sendMessage(data);
-        const resultMessage = success ?
-          `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message posted to <#${data.channel}>!${cat()}` :
-          `Failed to post message. Please check that I'm invited to <#${data.channel}>.${cat()}`;
-
-        try {
-          await client.chat.postEphemeral({
-            channel: body.user.id,
-            user: userId,
-            text: resultMessage
-          });
-        } catch (e) {
-          console.log('Could not send ephemeral result message.');
+        if (!msg.id) {
+          msg.id = generateId();
         }
-      } else {
-        const existingIndex = scheduledMessages.findIndex(m => m.id === data.id);
-        if (existingIndex >= 0) {
-          scheduledMessages[existingIndex] = data;
-        } else {
-          scheduledMessages.push(data);
-        }
-
-        saveMessages();
-        scheduleJob(data);
-
-        const successMessage = `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`;
-
-        try {
-          await client.chat.postEphemeral({
-            channel: body.user.id,
-            user: userId,
-            text: successMessage
-          });
-        } catch (e) {
-          console.log('Could not send ephemeral scheduling confirmation.');
-        }
-      }
-
-      updateUserActivity(userId);
-      formData.delete(userId);
-    } catch (error) {
-      console.error('Error during modal processing:', error);
-      await ack({
-        response_action: 'errors',
-        errors: { 'channel_block': 'An error occurred processing your request. Please try again.' }
-      });
-    }
-  } else {
-    await ack();
-  }
-});
-
-app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-  try {
-    const msgId = action.value;
-    scheduledMessages = scheduledMessages.filter(msg => msg.id !== msgId);
-
-    if (jobs.has(msgId)) {
-      try {
-        jobs.get(msgId).destroy();
-      } catch (_) {}
-      jobs.delete(msgId);
-    }
-
-    saveMessages();
-    await client.views.update({
-      view_id: body.view.id,
-      view: createModal('scheduled')
-    });
-  } catch (error) {
-    console.error('Delete message error:', error);
-  }
-});
-
-app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-  
-  try {
-    console.log('Raw action_id received:', action.action_id);
-    console.log('Action value:', action.value);
-    
-    const actionParts = action.action_id.split('_');
-    console.log('Action parts:', actionParts);
-    
-    if (actionParts.length < 4) {
-      throw new Error(`Invalid action_id format: ${action.action_id}. Expected: poll_vote_msgId_optionIndex`);
-    }
-    
-    const msgId = actionParts.slice(2, -1).join('_');
-    const optionId = actionParts[actionParts.length - 1];
-    const optionIndex = parseInt(optionId);
-    
-    const user = body.user.id;
-    const channel = body.channel && body.channel.id;
-    const messageTs = body.message && body.message.ts;
-
-    console.log(`Poll vote parsed: msgId=${msgId}, optionId=${optionId}, optionIndex=${optionIndex}, user=${user}, messageTs=${messageTs}`);
-
-    if (isNaN(optionIndex)) {
-      throw new Error(`Invalid option index: ${optionId} is not a number`);
-    }
-
-    let pollData = scheduledMessages.find(m => m.id === msgId);
-    if (!pollData && messageTs) {
-      pollData = activePollMessages.get(messageTs);
-    }
-    
-    if (!pollData && body.message && body.message.blocks) {
-      console.log('Poll data not found in storage, attempting to reconstruct from message');
-      
-      let reconstructedTitle = 'Poll';
-      let reconstructedText = '';
-      const extractedOptions = [];
-      
-      body.message.blocks.forEach(block => {
-        if (block.type === 'section' && block.text && block.text.text && !reconstructedTitle.includes('*')) {
-          const titleMatch = block.text.text.match(/\*(.+?)\*/);
-          if (titleMatch) {
-            reconstructedTitle = titleMatch[1].replace(/₍\^. \.\^₎/, '').trim();
-          }
-        }
-        
-        if (block.type === 'section' && block.text && block.text.text && !block.text.text.includes('*') && !block.accessory) {
-          reconstructedText = block.text.text;
-        }
-        
-        if (block.type === 'section' && block.accessory && block.accessory.type === 'button') {
-          const optionText = block.text.text.replace(/\*(.+?)\*/, '$1').trim();
-          if (optionText && !extractedOptions.includes(optionText)) {
-            extractedOptions.push(optionText);
-          }
-        }
-      });
-      
-      if (extractedOptions.length > 0) {
-        pollData = {
-          id: msgId,
-          pollOptions: extractedOptions.join('\n'),
-          pollType: 'multiple',
-          pollSettings: [],
-          title: reconstructedTitle,
-          text: reconstructedText
-        };
-        
-        activePollMessages.set(messageTs, pollData);
-        console.log('Reconstructed poll data:', pollData);
-      }
-    }
-
-    if (!pollData) {
-      console.error(`Poll data not found for msgId: ${msgId}`);
-      console.log('Available active polls:', Array.from(activePollMessages.keys()));
-      console.log('Available scheduled polls:', scheduledMessages.map(m => m.id));
-      
-      try {
-        await client.chat.postEphemeral({
-          channel: channel || user,
-          user: user,
-          text: 'Poll data not found. Please try refreshing or contact an admin if this persists.'
-        });
-      } catch (e) {
-        console.log('Could not send poll not found message.');
-      }
-      return;
-    }
-
-    console.log('Found poll data:', JSON.stringify(pollData, null, 2));
-
-    const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
-    console.log(`Poll options:`, options);
-
-    if (messageTs && !activePollMessages.has(messageTs)) {
-      activePollMessages.set(messageTs, pollData);
-      console.log(`Stored poll data in activePollMessages for ${messageTs}`);
-    }
-
-    if (!pollVotes[msgId]) {
-      pollVotes[msgId] = {};
-      console.log(`Created new vote tracking for msgId: ${msgId}`);
-    }
-
-    for (let i = 0; i < options.length; i++) {
-      if (!pollVotes[msgId][i]) {
-        pollVotes[msgId][i] = new Set();
-        console.log(`Created vote set for option ${i}`);
-      }
-    }
-
-    if (optionIndex < 0 || optionIndex >= options.length) {
-      console.error(`Invalid option index: ${optionIndex} for poll with ${options.length} options`);
-      try {
-        await client.chat.postEphemeral({
-          channel: channel || user,
-          user: user,
-          text: 'Invalid poll option. Please try again.'
-        });
-      } catch (e) {
-        console.log('Could not send invalid option message.');
-      }
-      return;
-    }
-
-    if (!pollVotes[msgId][optionIndex]) {
-      pollVotes[msgId][optionIndex] = new Set();
-      console.log(`Created missing vote set for option ${optionIndex}`);
-    }
-
-    console.log(`Vote tracking state for ${msgId}:`, Object.keys(pollVotes[msgId]));
-
-    let userVoteChanged = false;
-
-    if (pollData.pollType === 'single') {
-      Object.keys(pollVotes[msgId]).forEach(idx => {
-        if (parseInt(idx) !== optionIndex && pollVotes[msgId][idx].has(user)) {
-          pollVotes[msgId][idx].delete(user);
-          userVoteChanged = true;
-        }
-      });
-      
-      if (pollVotes[msgId][optionIndex].has(user)) {
-        pollVotes[msgId][optionIndex].delete(user);
-        console.log(`Removed vote from option ${optionIndex} (single choice)`);
-        userVoteChanged = true;
-      } else {
-        pollVotes[msgId][optionIndex].add(user);
-        console.log(`Added vote to option ${optionIndex} (single choice)`);
-        userVoteChanged = true;
-      }
-    } else {
-      if (pollVotes[msgId][optionIndex].has(user)) {
-        pollVotes[msgId][optionIndex].delete(user);
-        console.log(`Removed vote from option ${optionIndex} (multiple choice)`);
-        userVoteChanged = true;
-      } else {
-        pollVotes[msgId][optionIndex].add(user);
-        console.log(`Added vote to option ${optionIndex} (multiple choice)`);
-        userVoteChanged = true;
-      }
-    }
-
-    if (userVoteChanged && messageTs && channel) {
-      console.log('About to update poll message with vote data:', JSON.stringify(pollVotes[msgId], null, 2));
-      await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
-    }
-
-    console.log(`Vote processed for user ${user} on poll ${msgId}`);
-    
-  } catch (error) {
-    console.error('Poll vote error:', error);
-    console.error('Error stack:', error.stack);
-    
-    try {
-      await client.chat.postEphemeral({
-        channel: (body.channel && body.channel.id) || body.user.id,
-        user: body.user.id,
-        text: 'There was an error processing your vote. Please try again.'
-      });
-    } catch (e) {
-      console.log('Could not send error message to user.');
-    }
-  }
-});
-
-app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-  try {
-    const actionData = JSON.parse(action.value);
-    const msgId = actionData.msgId;
-    const alertChannels = actionData.alertChannels || [];
-    const user = body.user.id;
-    const channel = (body.channel && body.channel.id) || null;
-
-    if (!alertChannels || alertChannels.length === 0) {
-      try {
-        await client.chat.postEphemeral({
-          channel: channel || user,
-          user,
-          text: 'No alert channels configured for this help button.'
-        });
-      } catch (e) {
-        console.log('Could not post ephemeral help warning.');
-      }
-      return;
-    }
-
-    let successCount = 0;
-    const alertPromises = alertChannels.map(async (alertChannel) => {
-      try {
-        await client.chat.postMessage({
-          channel: alertChannel,
-          text: `<@${user}> needs backup in ${channel ? `<#${channel}>` : 'this area'}`,
-          unfurl_links: false,
-          unfurl_media: false
-        });
-        successCount++;
-      } catch (e) {
-        console.error(`Alert failed for channel ${alertChannel}:`, e);
-      }
-    });
-
-    await Promise.all(alertPromises);
-
-    try {
-      await client.chat.postEphemeral({
-        channel: channel || user,
-        user,
-        text: `Backup request sent to ${successCount}/${alertChannels.length} alert channels.${cat()}`
-      });
-    } catch (e) {
-      console.log('Could not post ephemeral confirmation.');
-    }
-
-    console.log(`Backup request from ${user} sent to ${successCount}/${alertChannels.length} alert channels`);
-  } catch (error) {
-    console.error('Help button error:', error);
-  }
-});
-
-app.command('/cat-debug', async ({ ack, body, client }) => {
-  await ack();
-
-  const channelId = body.channel_id;
-  const userId = body.user_id;
-
-  await client.chat.postEphemeral({
-    channel: channelId,
-    user: userId,
-    text: 'Running debug tests... check console for details'
-  });
-
-  try {
-    const authTest = await client.auth.test();
-    const channelInfo = await client.conversations.info({ channel: channelId });
-    const testResult = await client.chat.postMessage({
-      channel: channelId,
-      text: 'Debug test message - if you see this, posting works!'
-    });
-
-    if (testResult.ok) {
-      await client.chat.postEphemeral({
-        channel: channelId,
-        user: userId,
-        text: 'Debug complete - message posting works! Test message will be deleted in 5 seconds.'
-      });
-
-      setTimeout(async () => {
-        try {
-          await client.chat.delete({
-            channel: channelId,
-            ts: testResult.ts
-          });
-        } catch (e) {
-          console.log('Note: Could not delete test message');
-        }
-      }, 5000);
-    }
-  } catch (error) {
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: 'Debug failed - check console for details'
-    });
-  }
-});
-
-app.command('/cat-form-debug', async ({ ack, body, client }) => {
-  await ack();
-
-  const userId = body.user_id;
-  const userData = formData.get(userId);
-
-  await client.chat.postEphemeral({
-    channel: body.channel_id,
-    user: userId,
-    text: `Form Data Debug:\n\`\`\`${JSON.stringify(userData, null, 2) || 'No data found'}\`\`\`\n\nFormData Size: ${formData.size} users`
-  });
-});
-
-app.error((error) => {
-  console.error('Global error:', error);
-  if (error.message && error.message.includes('poll')) {
-    console.error('Poll-specific error details:', {
-      message: error.message,
-      stack: error.stack && error.stack.slice(0, 500)
-    });
-  }
-});
-
-cron.schedule('0 * * * *', () => {
-  const beforeCount = scheduledMessages.length;
-  scheduledMessages = scheduledMessages.filter(msg => {
-    if (msg.repeat !== 'none') return true;
-
-    const isPast = isDateTimeInPast(msg.date, msg.time);
-    if (isPast) {
-      if (jobs.has(msg.id)) {
-        try {
-          jobs.get(msg.id).destroy();
-        } catch (_) {}
-        jobs.delete(msg.id);
-      }
-    }
-
-    return !isPast;
-  });
-
-  if (scheduledMessages.length !== beforeCount) {
-    saveMessages();
-    console.log(`${cat()} Cleaned up ${beforeCount - scheduledMessages.length} expired messages`);
-  }
-}, {
-  timezone: 'America/New_York'
-});
-
-(async () => {
-  try {
-    const keepAliveServer = require('http').createServer((req, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('PM Squad Bot Enhanced is running!');
-    });
-
-    const PORT = process.env.PORT || 3000;
-    keepAliveServer.listen(PORT, () => {
-      console.log(`Keep-alive server running on port ${PORT}`);
-    });
-
-    scheduledMessages.forEach(msg => scheduleJob(msg));
-
-    await app.start();
-    
-    console.log('PM Squad Bot "Cat Scratch" Enhanced Version is running!');
-    console.log(`Loaded ${scheduledMessages.length} scheduled messages`);
-    console.log(`Active jobs: ${jobs.size}`);
-    console.log(`Current EST time: ${currentTimeInEST()}`);
-    console.log(`Current EST date: ${todayInEST()}`);
-    console.log(`User data entries: ${Object.keys(userData).length}`);
-
-    if (scheduledMessages.length > 0) {
-      console.log('Scheduled Messages:');
-      scheduledMessages.forEach(msg => {
-        const nextRun = msg.repeat === 'none' ?
-          `${msg.date} at ${msg.time}` :
-          `${msg.repeat} at ${msg.time}`;
-        console.log(`  - ${msg.type}: ${nextRun} -> #${msg.channel}`);
-      });
-    }
-
-    console.log('Available commands:');
-    console.log('  /cat - Main menu');
-    console.log('  /capacity - Direct capacity check');
-    console.log('  /help - Create help button');
-    console.log('  /manage - Message management');
-    console.log('  /cat-debug - Debug testing');
-    console.log('  /cat-form-debug - Form data debugging');
-    console.log('All poll action handlers initialized successfully');
-    console.log('All systems ready!');
-  } catch (error) {
-    console.error('Failed to start app:', error);
-    process.exit(1);
-  }
-})();
-
-process.on('SIGINT', () => {
-  console.log(`${cat()} Shutting down, cleaning up jobs...`);
-  jobs.forEach(job => job.destroy());
-  process.exit(0);
-}); (msg.repeat !== 'none') return true;
+        // Only keep messages that aren't expired (for non-repeating ones)
+        if (msg.repeat !== 'none') return true;
         return !isDateTimeInPast(msg.date, msg.time);
       });
       saveMessages();
@@ -2624,6 +2154,277 @@ for (let i = 0; i < 10; i++) {
   });
 }
 
+// ================================
+// MESSAGE SUBMISSION & ACTION HANDLERS
+// ================================
+
+app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
+  await ack();
+  try {
+    const msgId = action.value;
+    scheduledMessages = scheduledMessages.filter(msg => msg.id !== msgId);
+
+    if (jobs.has(msgId)) {
+      try {
+        jobs.get(msgId).destroy();
+      } catch (_) {}
+      jobs.delete(msgId);
+    }
+
+    saveMessages();
+    await client.views.update({
+      view_id: body.view.id,
+      view: createModal('scheduled')
+    });
+  } catch (error) {
+    console.error('Delete message error:', error);
+  }
+});
+
+app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
+  await ack();
+  
+  try {
+    console.log('Raw action_id received:', action.action_id);
+    console.log('Action value:', action.value);
+    
+    const actionParts = action.action_id.split('_');
+    console.log('Action parts:', actionParts);
+    
+    if (actionParts.length < 4) {
+      throw new Error(`Invalid action_id format: ${action.action_id}. Expected: poll_vote_msgId_optionIndex`);
+    }
+    
+    const msgId = actionParts.slice(2, -1).join('_');
+    const optionId = actionParts[actionParts.length - 1];
+    const optionIndex = parseInt(optionId);
+    
+    const user = body.user.id;
+    const channel = body.channel && body.channel.id;
+    const messageTs = body.message && body.message.ts;
+
+    console.log(`Poll vote parsed: msgId=${msgId}, optionId=${optionId}, optionIndex=${optionIndex}, user=${user}, messageTs=${messageTs}`);
+
+    if (isNaN(optionIndex)) {
+      throw new Error(`Invalid option index: ${optionId} is not a number`);
+    }
+
+    let pollData = scheduledMessages.find(m => m.id === msgId);
+    if (!pollData && messageTs) {
+      pollData = activePollMessages.get(messageTs);
+    }
+    
+    if (!pollData && body.message && body.message.blocks) {
+      console.log('Poll data not found in storage, attempting to reconstruct from message');
+      
+      let reconstructedTitle = 'Poll';
+      let reconstructedText = '';
+      const extractedOptions = [];
+      
+      body.message.blocks.forEach(block => {
+        if (block.type === 'section' && block.text && block.text.text && !reconstructedTitle.includes('*')) {
+          const titleMatch = block.text.text.match(/\*(.+?)\*/);
+          if (titleMatch) {
+            reconstructedTitle = titleMatch[1].replace(/₍\^. \.\^₎/, '').trim();
+          }
+        }
+        
+        if (block.type === 'section' && block.text && block.text.text && !block.text.text.includes('*') && !block.accessory) {
+          reconstructedText = block.text.text;
+        }
+        
+        if (block.type === 'section' && block.accessory && block.accessory.type === 'button') {
+          const optionText = block.text.text.replace(/\*(.+?)\*/, '$1').trim();
+          if (optionText && !extractedOptions.includes(optionText)) {
+            extractedOptions.push(optionText);
+          }
+        }
+      });
+      
+      if (extractedOptions.length > 0) {
+        pollData = {
+          id: msgId,
+          pollOptions: extractedOptions.join('\n'),
+          pollType: 'multiple',
+          pollSettings: [],
+          title: reconstructedTitle,
+          text: reconstructedText
+        };
+        
+        activePollMessages.set(messageTs, pollData);
+        console.log('Reconstructed poll data:', pollData);
+      }
+    }
+
+    if (!pollData) {
+      console.error(`Poll data not found for msgId: ${msgId}`);
+      console.log('Available active polls:', Array.from(activePollMessages.keys()));
+      console.log('Available scheduled polls:', scheduledMessages.map(m => m.id));
+      
+      try {
+        await client.chat.postEphemeral({
+          channel: channel || user,
+          user: user,
+          text: 'Poll data not found. Please try refreshing or contact an admin if this persists.'
+        });
+      } catch (e) {
+        console.log('Could not send poll not found message.');
+      }
+      return;
+    }
+
+    console.log('Found poll data:', JSON.stringify(pollData, null, 2));
+
+    const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
+    console.log(`Poll options:`, options);
+
+    if (messageTs && !activePollMessages.has(messageTs)) {
+      activePollMessages.set(messageTs, pollData);
+      console.log(`Stored poll data in activePollMessages for ${messageTs}`);
+    }
+
+    if (!pollVotes[msgId]) {
+      pollVotes[msgId] = {};
+      console.log(`Created new vote tracking for msgId: ${msgId}`);
+    }
+
+    for (let i = 0; i < options.length; i++) {
+      if (!pollVotes[msgId][i]) {
+        pollVotes[msgId][i] = new Set();
+        console.log(`Created vote set for option ${i}`);
+      }
+    }
+
+    if (optionIndex < 0 || optionIndex >= options.length) {
+      console.error(`Invalid option index: ${optionIndex} for poll with ${options.length} options`);
+      try {
+        await client.chat.postEphemeral({
+          channel: channel || user,
+          user: user,
+          text: 'Invalid poll option. Please try again.'
+        });
+      } catch (e) {
+        console.log('Could not send invalid option message.');
+      }
+      return;
+    }
+
+    if (!pollVotes[msgId][optionIndex]) {
+      pollVotes[msgId][optionIndex] = new Set();
+      console.log(`Created missing vote set for option ${optionIndex}`);
+    }
+
+    console.log(`Vote tracking state for ${msgId}:`, Object.keys(pollVotes[msgId]));
+
+    let userVoteChanged = false;
+
+    if (pollData.pollType === 'single') {
+      Object.keys(pollVotes[msgId]).forEach(idx => {
+        if (parseInt(idx) !== optionIndex && pollVotes[msgId][idx].has(user)) {
+          pollVotes[msgId][idx].delete(user);
+          userVoteChanged = true;
+        }
+      });
+      
+      if (pollVotes[msgId][optionIndex].has(user)) {
+        pollVotes[msgId][optionIndex].delete(user);
+        console.log(`Removed vote from option ${optionIndex} (single choice)`);
+        userVoteChanged = true;
+      } else {
+        pollVotes[msgId][optionIndex].add(user);
+        console.log(`Added vote to option ${optionIndex} (single choice)`);
+        userVoteChanged = true;
+      }
+    } else {
+      if (pollVotes[msgId][optionIndex].has(user)) {
+        pollVotes[msgId][optionIndex].delete(user);
+        console.log(`Removed vote from option ${optionIndex} (multiple choice)`);
+        userVoteChanged = true;
+      } else {
+        pollVotes[msgId][optionIndex].add(user);
+        console.log(`Added vote to option ${optionIndex} (multiple choice)`);
+        userVoteChanged = true;
+      }
+    }
+
+    if (userVoteChanged && messageTs && channel) {
+      console.log('About to update poll message with vote data:', JSON.stringify(pollVotes[msgId], null, 2));
+      await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
+    }
+
+    console.log(`Vote processed for user ${user} on poll ${msgId}`);
+    
+  } catch (error) {
+    console.error('Poll vote error:', error);
+    console.error('Error stack:', error.stack);
+    
+    try {
+      await client.chat.postEphemeral({
+        channel: (body.channel && body.channel.id) || body.user.id,
+        user: body.user.id,
+        text: 'There was an error processing your vote. Please try again.'
+      });
+    } catch (e) {
+      console.log('Could not send error message to user.');
+    }
+  }
+});
+
+app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
+  await ack();
+  try {
+    const actionData = JSON.parse(action.value);
+    const msgId = actionData.msgId;
+    const alertChannels = actionData.alertChannels || [];
+    const user = body.user.id;
+    const channel = (body.channel && body.channel.id) || null;
+
+    if (!alertChannels || alertChannels.length === 0) {
+      try {
+        await client.chat.postEphemeral({
+          channel: channel || user,
+          user,
+          text: 'No alert channels configured for this help button.'
+        });
+      } catch (e) {
+        console.log('Could not post ephemeral help warning.');
+      }
+      return;
+    }
+
+    let successCount = 0;
+    const alertPromises = alertChannels.map(async (alertChannel) => {
+      try {
+        await client.chat.postMessage({
+          channel: alertChannel,
+          text: `<@${user}> needs backup in ${channel ? `<#${channel}>` : 'this area'}`,
+          unfurl_links: false,
+          unfurl_media: false
+        });
+        successCount++;
+      } catch (e) {
+        console.error(`Alert failed for channel ${alertChannel}:`, e);
+      }
+    });
+
+    await Promise.all(alertPromises);
+
+    try {
+      await client.chat.postEphemeral({
+        channel: channel || user,
+        user,
+        text: `Backup request sent to ${successCount}/${alertChannels.length} alert channels.${cat()}`
+      });
+    } catch (e) {
+      console.log('Could not post ephemeral confirmation.');
+    }
+
+    console.log(`Backup request from ${user} sent to ${successCount}/${alertChannels.length} alert channels`);
+  } catch (error) {
+    console.error('Help button error:', error);
+  }
+});
+
 // Poll Management Actions
 app.action('poll_menu', async ({ ack, body, client }) => {
   await ack();
@@ -2875,4 +2676,218 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
         data.alertChannels = extractedAlertChannels || data.alertChannels || [];
       }
 
-      if
+      if (!data.id) {
+        data.id = generateId();
+      }
+
+      const finalScheduleType = data.scheduleType || 'schedule';
+
+      if (finalScheduleType === 'now') {
+        const success = await sendMessage(data);
+        const resultMessage = success ?
+          `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message posted to <#${data.channel}>!${cat()}` :
+          `Failed to post message. Please check that I'm invited to <#${data.channel}>.${cat()}`;
+
+        try {
+          await client.chat.postEphemeral({
+            channel: body.user.id,
+            user: userId,
+            text: resultMessage
+          });
+        } catch (e) {
+          console.log('Could not send ephemeral result message.');
+        }
+      } else {
+        const existingIndex = scheduledMessages.findIndex(m => m.id === data.id);
+        if (existingIndex >= 0) {
+          scheduledMessages[existingIndex] = data;
+        } else {
+          scheduledMessages.push(data);
+        }
+
+        saveMessages();
+        scheduleJob(data);
+
+        const successMessage = `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`;
+
+        try {
+          await client.chat.postEphemeral({
+            channel: body.user.id,
+            user: userId,
+            text: successMessage
+          });
+        } catch (e) {
+          console.log('Could not send ephemeral scheduling confirmation.');
+        }
+      }
+
+      updateUserActivity(userId);
+      formData.delete(userId);
+    } catch (error) {
+      console.error('Error during modal processing:', error);
+      await ack({
+        response_action: 'errors',
+        errors: { 'channel_block': 'An error occurred processing your request. Please try again.' }
+      });
+    }
+  } else {
+    await ack();
+  }
+});
+
+// Debug Commands
+app.command('/cat-debug', async ({ ack, body, client }) => {
+  await ack();
+
+  const channelId = body.channel_id;
+  const userId = body.user_id;
+
+  await client.chat.postEphemeral({
+    channel: channelId,
+    user: userId,
+    text: 'Running debug tests... check console for details'
+  });
+
+  try {
+    const authTest = await client.auth.test();
+    const channelInfo = await client.conversations.info({ channel: channelId });
+    const testResult = await client.chat.postMessage({
+      channel: channelId,
+      text: 'Debug test message - if you see this, posting works!'
+    });
+
+    if (testResult.ok) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: 'Debug complete - message posting works! Test message will be deleted in 5 seconds.'
+      });
+
+      setTimeout(async () => {
+        try {
+          await client.chat.delete({
+            channel: channelId,
+            ts: testResult.ts
+          });
+        } catch (e) {
+          console.log('Note: Could not delete test message');
+        }
+      }, 5000);
+    }
+  } catch (error) {
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      text: 'Debug failed - check console for details'
+    });
+  }
+});
+
+app.command('/cat-form-debug', async ({ ack, body, client }) => {
+  await ack();
+
+  const userId = body.user_id;
+  const userData = formData.get(userId);
+
+  await client.chat.postEphemeral({
+    channel: body.channel_id,
+    user: userId,
+    text: `Form Data Debug:\n\`\`\`${JSON.stringify(userData, null, 2) || 'No data found'}\`\`\`\n\nFormData Size: ${formData.size} users`
+  });
+});
+
+// Error handling
+app.error((error) => {
+  console.error('Global error:', error);
+  if (error.message && error.message.includes('poll')) {
+    console.error('Poll-specific error details:', {
+      message: error.message,
+      stack: error.stack && error.stack.slice(0, 500)
+    });
+  }
+});
+
+// Cleanup job for expired messages
+cron.schedule('0 * * * *', () => {
+  const beforeCount = scheduledMessages.length;
+  scheduledMessages = scheduledMessages.filter(msg => {
+    if (msg.repeat !== 'none') return true;
+
+    const isPast = isDateTimeInPast(msg.date, msg.time);
+    if (isPast) {
+      if (jobs.has(msg.id)) {
+        try {
+          jobs.get(msg.id).destroy();
+        } catch (_) {}
+        jobs.delete(msg.id);
+      }
+    }
+
+    return !isPast;
+  });
+
+  if (scheduledMessages.length !== beforeCount) {
+    saveMessages();
+    console.log(`${cat()} Cleaned up ${beforeCount - scheduledMessages.length} expired messages`);
+  }
+}, {
+  timezone: 'America/New_York'
+});
+
+// ================================
+// STARTUP
+// ================================
+
+(async () => {
+  try {
+    const keepAliveServer = require('http').createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('PM Squad Bot Enhanced is running!');
+    });
+
+    const PORT = process.env.PORT || 3000;
+    keepAliveServer.listen(PORT, () => {
+      console.log(`Keep-alive server running on port ${PORT}`);
+    });
+
+    scheduledMessages.forEach(msg => scheduleJob(msg));
+
+    await app.start();
+    
+    console.log('PM Squad Bot "Cat Scratch" Enhanced Version is running!');
+    console.log(`Loaded ${scheduledMessages.length} scheduled messages`);
+    console.log(`Active jobs: ${jobs.size}`);
+    console.log(`Current EST time: ${currentTimeInEST()}`);
+    console.log(`Current EST date: ${todayInEST()}`);
+    console.log(`User data entries: ${Object.keys(userData).length}`);
+
+    if (scheduledMessages.length > 0) {
+      console.log('Scheduled Messages:');
+      scheduledMessages.forEach(msg => {
+        const nextRun = msg.repeat === 'none' ?
+          `${msg.date} at ${msg.time}` :
+          `${msg.repeat} at ${msg.time}`;
+        console.log(`  - ${msg.type}: ${nextRun} -> #${msg.channel}`);
+      });
+    }
+
+    console.log('Available commands:');
+    console.log('  /cat - Main menu');
+    console.log('  /capacity - Direct capacity check');
+    console.log('  /help - Create help button');
+    console.log('  /manage - Message management');
+    console.log('  /cat-debug - Debug testing');
+    console.log('  /cat-form-debug - Form data debugging');
+    console.log('All poll action handlers initialized successfully');
+    console.log('All systems ready!');
+  } catch (error) {
+    console.error('Failed to start app:', error);
+    process.exit(1);
+  }
+})();
+
+process.on('SIGINT', () => {
+  console.log(`${cat()} Shutting down, cleaning up jobs...`);
+  jobs.forEach(job => job.destroy());
+  process.exit(0);
+});
