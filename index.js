@@ -827,6 +827,7 @@ function createModal(page, data = {}) {
         const optionData = enhancedOptions[index] || {};
         const showDetails = optionData.showDetails || false;
 
+        // Option input field
         commonBlocks.push({
           type: 'input',
           block_id: `option_${index}_block`,
@@ -837,7 +838,16 @@ function createModal(page, data = {}) {
             initial_value: option || '',
             placeholder: { type: 'plain_text', text: `Enter option ${index + 1}...` }
           },
-          optional: index >= 2,
+          optional: index >= 2
+        });
+
+        // Add details button in separate section
+        commonBlocks.push({
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: showDetails ? 'Hide additional details for this option' : 'Add description, image, or links to this option'
+          },
           accessory: {
             type: 'button',
             text: { type: 'plain_text', text: showDetails ? 'Hide Details' : 'Add Details' },
