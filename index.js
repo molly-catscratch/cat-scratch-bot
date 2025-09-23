@@ -1,6 +1,7 @@
 /**
- * PM Squad Bot - Cat Scratch (Clean Version)
- * Flow: Menu → Form (content) → Preview → Schedule (channel + timing) → Send/Schedule
+ * PM Squad Bot - Cat Scratch (Enhanced Complete Version)
+ * Features: Multiple slash commands, App Home, Enhanced polling, All original functionality
+ * Flow: Menu → Form → Preview → Schedule → Send/Schedule
  * Requirements: npm i @slack/bolt node-cron dotenv
  * ENV: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_SIGNING_SECRET
  */
@@ -27,7 +28,9 @@ const app = new App({
 // ================================
 
 const SCHEDULE_FILE = './scheduledMessages.json';
+const USER_DATA_FILE = './userData.json';
 let scheduledMessages = [];
+let userData = {};
 const jobs = new Map();
 const pollVotes = {};
 const formData = new Map();
@@ -38,6 +41,14 @@ function saveMessages() {
     fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(scheduledMessages, null, 2));
   } catch (e) {
     console.error('Save failed:', e);
+  }
+}
+
+function saveUserData() {
+  try {
+    fs.writeFileSync(USER_DATA_FILE, JSON.stringify(userData, null, 2));
+  } catch (e) {
+    console.error('User data save failed:', e);
   }
 }
 
@@ -57,7 +68,44 @@ function loadMessages() {
   }
 }
 
+function loadUserData() {
+  if (fs.existsSync(USER_DATA_FILE)) {
+    try {
+      userData = JSON.parse(fs.readFileSync(USER_DATA_FILE));
+    } catch (e) {
+      console.error('User data load failed:', e);
+      userData = {};
+    }
+  }
+}
+
 loadMessages();
+loadUserData();
+
+// ================================
+// USER DATA MANAGEMENT
+// ================================
+
+function getUserData(userId) {
+  if (!userData[userId]) {
+    userData[userId] = {
+      firstSeen: new Date().toISOString(),
+      totalMessages: 0,
+      lastUsed: new Date().toISOString(),
+      isExperienced: false
+    };
+    saveUserData();
+  }
+  return userData[userId];
+}
+
+function updateUserActivity(userId) {
+  const user = getUserData(userId);
+  user.lastUsed = new Date().toISOString();
+  user.totalMessages = (user.totalMessages || 0) + 1;
+  user.isExperienced = user.totalMessages >= 3;
+  saveUserData();
+}
 
 // ================================
 // UTILITIES
@@ -168,16 +216,14 @@ function generatePreview(data) {
     previewText += `*${data.title || 'Poll'}*\n`;
     if (data.text) previewText += `${data.text}\n`;
 
-    if (data.pollType === 'open') {
-      previewText += '\nOpen discussion - responses in thread';
-    } else if (data.pollOptions) {
+    if (data.pollOptions) {
       const options = data.pollOptions.split('\n').filter(o => o.trim());
       previewText += '\n' + options.map((opt, i) => `${i + 1}. ${opt.trim()}`).join('\n');
-
+      
       if (data.pollSettings?.length > 0) {
         previewText += `\n\nSettings: ${data.pollSettings.join(', ')}`;
       }
-
+      
       const voteType = data.pollType === 'single' ? 'Single choice' : 'Multiple choice';
       previewText += `\nType: ${voteType}`;
     }
@@ -201,7 +247,121 @@ function generatePreview(data) {
 }
 
 // ================================
-// MODAL CREATION
+// APP HOME VIEW
+// ================================
+
+function createAppHome(userId) {
+  const user = getUserData(userId);
+  const userMessages = scheduledMessages.filter(msg => msg.createdBy === userId);
+  
+  const blocks = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Welcome to Cat Scratch!* ${cat()}\n${user.isExperienced ? 'Quick actions below:' : 'Choose an action to get started:'}`
+      }
+    },
+    { type: 'divider' }
+  ];
+
+  if (!user.isExperienced) {
+    blocks.push(
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*Getting Started*\nCat Scratch helps you manage team communications. You can create capacity checks, help buttons, polls, and custom messages - all with flexible scheduling options.'
+        }
+      },
+      { type: 'divider' }
+    );
+  }
+
+  // Quick action buttons
+  blocks.push(
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*Quick Actions*'
+      }
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          style: 'primary',
+          text: { type: 'plain_text', text: 'Capacity Check' },
+          action_id: 'home_capacity'
+        },
+        {
+          type: 'button',
+          style: 'danger',
+          text: { type: 'plain_text', text: 'Help Button' },
+          action_id: 'home_help'
+        }
+      ]
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Create Poll' },
+          action_id: 'home_poll'
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Custom Message' },
+          action_id: 'home_custom'
+        }
+      ]
+    }
+  );
+
+  // Statistics for experienced users
+  if (user.isExperienced) {
+    blocks.push(
+      { type: 'divider' },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Your Activity*\n• Messages created: ${user.totalMessages}\n• Scheduled messages: ${userMessages.length}\n• Member since: ${new Date(user.firstSeen).toLocaleDateString()}`
+        }
+      }
+    );
+  }
+
+  // Management section
+  if (scheduledMessages.length > 0) {
+    blocks.push(
+      { type: 'divider' },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Management*\n${scheduledMessages.length} total scheduled messages`
+        },
+        accessory: {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Manage' },
+          action_id: 'home_manage'
+        }
+      }
+    );
+  }
+
+  return {
+    type: 'home',
+    blocks
+  };
+}
+
+// ================================
+// MODAL CREATION - ENHANCED
 // ================================
 
 function createModal(page, data = {}) {
@@ -256,6 +416,16 @@ function createModal(page, data = {}) {
               type: 'button', 
               text: { type: 'plain_text', text: 'Custom Message' }, 
               action_id: 'nav_custom' 
+            }
+          ]
+        },
+        {
+          type: 'actions',
+          elements: [
+            { 
+              type: 'button', 
+              text: { type: 'plain_text', text: 'Create Poll' }, 
+              action_id: 'nav_poll' 
             }
           ]
         },
@@ -609,7 +779,7 @@ function createModal(page, data = {}) {
     }
   );
 
-  // POLL specific blocks - NO ANONYMOUS VOTING
+  // ENHANCED POLL BLOCKS
   if (page === 'poll') {
     try {
       commonBlocks.push(
@@ -625,72 +795,111 @@ function createModal(page, data = {}) {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: 'All polls support multiple choice voting. Users can select multiple options and change their votes anytime. Voter names are always visible.'
+            text: '*Poll Type*'
           }
-        }
-      );
-
-      commonBlocks.push(
-        { type: 'divider' },
-        { 
-          type: 'section', 
-          text: { 
-            type: 'mrkdwn', 
-            text: '*Poll Options*' 
-          }
-        }
-      );
-
-      const options = data.pollOptions ?
-        data.pollOptions.split('\n').filter(o => o.trim()) :
-        ['Option 1', 'Option 2'];
-
-      while (options.length < 2) {
-        options.push(`Option ${options.length + 1}`);
-      }
-
-      options.forEach((option, index) => {
-        commonBlocks.push({
+        },
+        {
           type: 'input',
-          block_id: `option_${index}_block`,
-          label: { type: 'plain_text', text: `Option ${index + 1}` },
+          block_id: 'poll_type_section',
+          label: { type: 'plain_text', text: 'Voting Type' },
           element: {
-            type: 'plain_text_input',
-            action_id: `option_${index}_input`,
-            initial_value: option || '',
-            placeholder: { type: 'plain_text', text: `Enter option ${index + 1}...` }
+            type: 'radio_buttons',
+            action_id: 'poll_type_radio',
+            initial_option: data.pollType === 'single' ?
+              { text: { type: 'plain_text', text: 'Single choice (one vote per person)' }, value: 'single' } :
+              data.pollType === 'multiple' ?
+              { text: { type: 'plain_text', text: 'Multiple choice (multiple votes allowed)' }, value: 'multiple' } :
+              { text: { type: 'plain_text', text: 'Multiple choice (multiple votes allowed)' }, value: 'multiple' },
+            options: [
+              { text: { type: 'plain_text', text: 'Single choice (one vote per person)' }, value: 'single' },
+              { text: { type: 'plain_text', text: 'Multiple choice (multiple votes allowed)' }, value: 'multiple' }
+            ]
+          }
+        },
+        {
+          type: 'input',
+          block_id: 'poll_settings_section',
+          label: { type: 'plain_text', text: 'Poll Settings' },
+          element: {
+            type: 'checkboxes',
+            action_id: 'poll_settings_checkboxes',
+            initial_options: data.pollSettings?.map(setting => ({
+              text: { type: 'plain_text', text: setting === 'show_counts' ? 'Show vote counts' : setting === 'anonymous' ? 'Anonymous voting' : setting },
+              value: setting
+            })) || [],
+            options: [
+              { text: { type: 'plain_text', text: 'Show vote counts' }, value: 'show_counts' },
+              { text: { type: 'plain_text', text: 'Anonymous voting' }, value: 'anonymous' }
+            ]
           },
-          optional: index >= 2
-        });
-      });
+          optional: true
+        }
+      );
 
-      const actionElements = [];
+      // Poll options section
+      if (data.pollType !== 'open') {
+        commonBlocks.push(
+          { type: 'divider' },
+          { 
+            type: 'section', 
+            text: { 
+              type: 'mrkdwn', 
+              text: '*Poll Options*' 
+            }
+          }
+        );
 
-      if (options.length < 10) {
-        actionElements.push({
-          type: 'button',
-          style: 'primary',
-          text: { type: 'plain_text', text: 'Add Option' },
-          action_id: 'add_poll_option',
-          value: 'add'
-        });
-      }
+        const options = data.pollOptions ?
+          data.pollOptions.split('\n').filter(o => o.trim()) :
+          ['Option 1', 'Option 2'];
 
-      if (options.length > 2) {
-        actionElements.push({
-          type: 'button',
-          text: { type: 'plain_text', text: 'Remove Last Option' },
-          action_id: 'remove_poll_option',
-          style: 'danger',
-          value: 'remove'
-        });
-      }
+        while (options.length < 2) {
+          options.push(`Option ${options.length + 1}`);
+        }
 
-      if (actionElements.length > 0) {
-        commonBlocks.push({
-          type: 'actions',
-          elements: actionElements
+        options.forEach((option, index) => {
+          commonBlocks.push({
+            type: 'input',
+            block_id: `option_${index}_block`,
+            label: { type: 'plain_text', text: `Option ${index + 1}` },
+            element: {
+              type: 'plain_text_input',
+              action_id: `option_${index}_input`,
+              initial_value: option || '',
+              placeholder: { type: 'plain_text', text: `Enter option ${index + 1}...` }
+            },
+            optional: index >= 2
+          });
         });
+
+        const actionElements = [];
+
+        if (options.length < 10) {
+          actionElements.push({
+            type: 'button',
+            style: 'primary',
+            text: { type: 'plain_text', text: 'Add Option' },
+            action_id: 'add_poll_option',
+            value: 'add'
+          });
+        }
+
+        if (options.length > 2) {
+          actionElements.push({
+            type: 'button',
+            text: { type: 'plain_text', text: 'Remove Last Option' },
+            action_id: 'remove_poll_option',
+            style: 'danger',
+            value: 'remove'
+          });
+        }
+
+        if (actionElements.length > 0) {
+          commonBlocks.push({
+            type: 'actions',
+            elements: actionElements
+          });
+        }
       }
 
     } catch (error) {
@@ -742,7 +951,7 @@ function createModal(page, data = {}) {
 }
 
 // ================================
-// MESSAGE SENDING - FIXED POLL HANDLING
+// ENHANCED POLL MESSAGE HANDLING
 // ================================
 
 async function updatePollMessage(client, channel, messageTs, pollData, votes) {
@@ -758,69 +967,97 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
         type: 'section', 
         text: { 
           type: 'mrkdwn', 
-          text: `*${pollData.title || 'Poll'}*${cat()}\n${pollData.text || ''}` 
+          text: `*${pollData.title || 'Poll'}*${cat()}`
         }
       }
     ];
 
-    if (pollData.pollType !== 'open' && options.length > 0) {
-      const buttonElements = options.map((option, idx) => {
-        let buttonText = option.slice(0, 70);
+    if (pollData.text) {
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: pollData.text
+        }
+      });
+    }
+
+    blocks.push({ type: 'divider' });
+
+    if (options.length > 0) {
+      // Enhanced option blocks with individual vote counts
+      options.forEach((option, idx) => {
+        const voteCount = votes[idx] ? votes[idx].size : 0;
+        const voters = votes[idx] ? Array.from(votes[idx]) : [];
         
-        if (showCounts && votes[idx]) {
-          const count = votes[idx].size;
-          buttonText += ` (${count})`;
+        let optionText = `*${option}*`;
+        
+        if (showCounts) {
+          optionText += ` (${voteCount} vote${voteCount !== 1 ? 's' : ''})`;
         }
         
-        return {
-          type: 'button',
-          text: { type: 'plain_text', text: buttonText },
-          action_id: `poll_vote_${pollData.id}_${idx}`,
-          value: `${idx}`
-        };
-      });
-
-      for (let i = 0; i < buttonElements.length; i += 5) {
+        // Option section with vote button
         blocks.push({
-          type: 'actions',
-          block_id: `poll_${pollData.id}_${i}`,
-          elements: buttonElements.slice(i, i + 5)
-        });
-      }
-      
-      if (showCounts && !anonymous) {
-        let voteSummary = '';
-        options.forEach((option, idx) => {
-          if (votes[idx] && votes[idx].size > 0) {
-            const voters = Array.from(votes[idx]).map(userId => `<@${userId}>`).join(', ');
-            voteSummary += `*${option}*: ${voters}\n`;
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: optionText
+          },
+          accessory: {
+            type: 'button',
+            text: {
+              type: 'plain_text',
+              text: 'Vote'
+            },
+            action_id: `poll_vote_${pollData.id}_${idx}`,
+            value: `${idx}`
           }
         });
-        
-        if (voteSummary) {
+
+        // Vote details context
+        if (showCounts && voteCount > 0 && !anonymous) {
+          const voterNames = voters.map(userId => `<@${userId}>`).join(', ');
           blocks.push({
-            type: 'section',
-            text: {
+            type: 'context',
+            elements: [{
               type: 'mrkdwn',
-              text: `*Votes:*\n${voteSummary}`
-            }
+              text: voterNames
+            }]
+          });
+        } else if (showCounts && voteCount > 0 && anonymous) {
+          blocks.push({
+            type: 'context',
+            elements: [{
+              type: 'mrkdwn',
+              text: `${voteCount} vote${voteCount !== 1 ? 's' : ''}`
+            }]
+          });
+        } else {
+          blocks.push({
+            type: 'context',
+            elements: [{
+              type: 'mrkdwn',
+              text: 'No votes'
+            }]
           });
         }
-      }
+      });
     }
 
-    let contextText = pollData.pollType === 'single' ? 'Click to vote. Click again to unvote.' :
-      pollData.pollType === 'multiple' ? 'Click to vote (multiple choices). Click again to unvote.' :
-      'Open-ended poll. Use thread replies to respond.';
-      
-    if (showCounts && pollData.pollType !== 'open') {
-      const totalVotes = Object.values(votes).reduce((sum, voteSet) => sum + voteSet.size, 0);
-      contextText += ` • Total votes: ${totalVotes}`;
-    }
+    blocks.push({ type: 'divider' });
 
-    blocks.push({ 
-      type: 'context', 
-      elements: [{ type: 'mrkdwn', text: contextText }]
+    // Footer with poll info
+    const totalVotes = Object.values(votes).reduce((sum, voteSet) => sum + voteSet.size, 0);
+    const voteTypeText = pollData.pollType === 'single' ? 'Single choice' : 'Multiple choice';
+    
+    let footerText = `${voteTypeText} poll • ${totalVotes} total vote${totalVotes !== 1 ? 's' : ''} • Click again to unvote`;
+    
+    blocks.push({
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: footerText
+      }]
     });
 
     await client.chat.update({
@@ -836,6 +1073,10 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
     console.error('Failed to update poll message:', error);
   }
 }
+
+// ================================
+// MESSAGE SENDING - ENHANCED
+// ================================
 
 async function sendMessage(msg) {
   try {
@@ -862,23 +1103,26 @@ async function sendMessage(msg) {
       });
     
       if (result.ok && result.ts) {
-        try {
-          await app.client.reactions.add({
-            channel: msg.channel,
-            timestamp: result.ts,
-            name: 'black_cat' // custom emoji :black_cat:
-          });
-        } catch (e) {
-          console.error('Reaction failed for :black_cat::', e?.data?.error || e?.message);
+        const reactions = ['green_circle', 'large_yellow_circle', 'large_orange_circle', 'red_circle'];
+        for (const reaction of reactions) {
+          try {
+            await app.client.reactions.add({
+              channel: msg.channel,
+              timestamp: result.ts,
+              name: reaction
+            });
+          } catch (e) {
+            console.error(`Reaction failed for :${reaction}:`, e?.data?.error || e?.message);
+          }
         }
       }
     } else if (msg.type === 'poll') {
-      console.log('Sending poll message...');
+      console.log('Sending enhanced poll message...');
       const options = (msg.pollOptions || '').split('\n').map(s => s.trim()).filter(Boolean);
       console.log('Poll options:', options);
       console.log('Poll ID for buttons:', msg.id);
 
-      // Initialize vote tracking with proper error handling
+      // Initialize vote tracking
       if (!pollVotes[msg.id]) {
         pollVotes[msg.id] = {};
         for (let i = 0; i < options.length; i++) {
@@ -886,10 +1130,6 @@ async function sendMessage(msg) {
         }
         console.log('Initialized vote tracking for poll:', msg.id);
       }
-
-      // Force multiple choice for all polls, no anonymous voting
-      msg.pollType = 'multiple';
-      msg.pollSettings = [];
 
       let blocks = [
         { 
@@ -901,7 +1141,6 @@ async function sendMessage(msg) {
         }
       ];
 
-      // Add poll description if it exists
       if (msg.text) {
         blocks.push({
           type: 'section',
@@ -914,12 +1153,11 @@ async function sendMessage(msg) {
 
       blocks.push({ type: 'divider' });
 
-      // Create enhanced option blocks
+      // Enhanced option blocks
       options.forEach((option, idx) => {
         const actionId = `poll_vote_${msg.id}_${idx}`;
         console.log(`Creating button ${idx}: ${actionId}`);
         
-        // Option section with vote button
         blocks.push({
           type: 'section',
           text: {
@@ -937,7 +1175,6 @@ async function sendMessage(msg) {
           }
         });
 
-        // Initial vote count context (no votes)
         blocks.push({
           type: 'context',
           elements: [{
@@ -949,12 +1186,12 @@ async function sendMessage(msg) {
 
       blocks.push({ type: 'divider' });
 
-      // Footer
+      const voteTypeText = msg.pollType === 'single' ? 'Single choice' : 'Multiple choice';
       blocks.push({
         type: 'context',
         elements: [{
           type: 'mrkdwn',
-          text: 'Multiple choice poll • 0 total votes • Click again to unvote'
+          text: `${voteTypeText} poll • 0 total votes • Click again to unvote`
         }]
       });
 
@@ -1033,11 +1270,9 @@ function scheduleJob(msg) {
   let cronExpr;
 
   if (msg.repeat === 'daily') {
-    // Weekdays only (Mon–Fri)
     cronExpr = `${mm} ${hh} * * 1-5`;
   } else if (msg.repeat === 'weekly') {
     const day = new Date(msg.date).getDay();
-    // Only allow Mon–Fri
     if (day >= 1 && day <= 5) {
       cronExpr = `${mm} ${hh} * * ${day}`;
     } else {
@@ -1046,7 +1281,6 @@ function scheduleJob(msg) {
     }
   } else if (msg.repeat === 'monthly') {
     const day = msg.date.split('-')[2];
-    // Run only Mon–Fri
     cronExpr = `${mm} ${hh} ${day} * 1-5`;
   } else {
     const [y, mon, d] = msg.date.split('-');
@@ -1068,13 +1302,14 @@ function scheduleJob(msg) {
   jobs.set(msg.id, job);
 }
 
-
 // ================================
-// HANDLERS
+// SLASH COMMANDS - ENHANCED
 // ================================
 
+// Main menu command
 app.command('/cat', async ({ ack, body, client }) => {
   await ack();
+  updateUserActivity(body.user_id);
   try {
     await client.views.open({
       trigger_id: body.trigger_id,
@@ -1085,7 +1320,149 @@ app.command('/cat', async ({ ack, body, client }) => {
   }
 });
 
-// Navigation handlers
+// Direct message type commands
+app.command('/capacity', async ({ ack, body, client }) => {
+  await ack();
+  updateUserActivity(body.user_id);
+  try {
+    const userId = body.user_id;
+    const data = { 
+      type: 'capacity', 
+      text: templates.capacity, 
+      userModifiedText: false, 
+      scheduleType: 'schedule' 
+    };
+    formData.set(userId, data);
+    
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: createModal('capacity', data)
+    });
+  } catch (error) {
+    console.error('Failed to open capacity modal:', error);
+  }
+});
+
+app.command('/help', async ({ ack, body, client }) => {
+  await ack();
+  updateUserActivity(body.user_id);
+  try {
+    const userId = body.user_id;
+    const data = { 
+      type: 'help', 
+      text: templates.help, 
+      userModifiedText: false, 
+      alertChannels: [], 
+      scheduleType: 'schedule' 
+    };
+    formData.set(userId, data);
+    
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: createModal('help', data)
+    });
+  } catch (error) {
+    console.error('Failed to open help modal:', error);
+  }
+});
+
+app.command('/poll', async ({ ack, body, client }) => {
+  await ack();
+  updateUserActivity(body.user_id);
+  try {
+    const userId = body.user_id;
+    const data = { 
+      type: 'poll', 
+      text: '', 
+      title: '', 
+      pollType: 'multiple', 
+      pollOptions: 'Option 1\nOption 2', 
+      pollSettings: [], 
+      scheduleType: 'schedule' 
+    };
+    formData.set(userId, data);
+    
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: createModal('poll', data)
+    });
+  } catch (error) {
+    console.error('Failed to open poll modal:', error);
+  }
+});
+
+app.command('/manage', async ({ ack, body, client }) => {
+  await ack();
+  updateUserActivity(body.user_id);
+  try {
+    await client.views.open({
+      trigger_id: body.trigger_id,
+      view: createModal('scheduled')
+    });
+  } catch (error) {
+    console.error('Failed to open management modal:', error);
+  }
+});
+
+// ================================
+// APP HOME EVENTS
+// ================================
+
+app.event('app_home_opened', async ({ event, client }) => {
+  updateUserActivity(event.user);
+  try {
+    await client.views.publish({
+      user_id: event.user,
+      view: createAppHome(event.user)
+    });
+  } catch (error) {
+    console.error('Error publishing home view:', error);
+  }
+});
+
+// Home action handlers
+['home_capacity', 'home_help', 'home_poll', 'home_custom', 'home_manage'].forEach(action => {
+  app.action(action, async ({ ack, body, client }) => {
+    await ack();
+    updateUserActivity(body.user.id);
+    
+    try {
+      const actionType = action.replace('home_', '');
+      const userId = body.user.id;
+      let data = {};
+      
+      if (actionType === 'capacity') {
+        data = { type: 'capacity', text: templates.capacity, userModifiedText: false, scheduleType: 'schedule' };
+      } else if (actionType === 'help') {
+        data = { type: 'help', text: templates.help, userModifiedText: false, alertChannels: [], scheduleType: 'schedule' };
+      } else if (actionType === 'poll') {
+        data = { type: 'poll', text: '', title: '', pollType: 'multiple', pollOptions: 'Option 1\nOption 2', pollSettings: [], scheduleType: 'schedule' };
+      } else if (actionType === 'custom') {
+        data = { type: 'custom', text: '', title: '', scheduleType: 'schedule' };
+      } else if (actionType === 'manage') {
+        await client.views.open({
+          trigger_id: body.trigger_id,
+          view: createModal('scheduled')
+        });
+        return;
+      }
+      
+      formData.set(userId, data);
+      
+      await client.views.open({
+        trigger_id: body.trigger_id,
+        view: createModal(actionType, data)
+      });
+    } catch (error) {
+      console.error(`Failed to handle home action ${action}:`, error);
+    }
+  });
+});
+
+// ================================
+// NAVIGATION HANDLERS
+// ================================
+
 ['nav_menu', 'nav_scheduled', 'nav_preview', 'nav_schedule'].forEach(action => {
   app.action(action, async ({ ack, body, client }) => {
     await ack();
@@ -1121,22 +1498,20 @@ app.command('/cat', async ({ ack, body, client }) => {
 
           if (data.type === 'poll') {
             const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
-            data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'single';
+            data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
 
             const settingsBlock = values?.poll_settings_section?.poll_settings_checkboxes;
             data.pollSettings = settingsBlock?.selected_options?.map(opt => opt.value) || data.pollSettings || [];
 
-            if (data.pollType !== 'open') {
-              let extractedOptions = [];
-              let index = 0;
-              while (values[`option_${index}_block`]) {
-                const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
-                if (optionValue) extractedOptions.push(optionValue);
-                index++;
-              }
-              if (extractedOptions.length > 0) {
-                data.pollOptions = extractedOptions.join('\n');
-              }
+            let extractedOptions = [];
+            let index = 0;
+            while (values[`option_${index}_block`]) {
+              const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
+              if (optionValue) extractedOptions.push(optionValue);
+              index++;
+            }
+            if (extractedOptions.length > 0) {
+              data.pollOptions = extractedOptions.join('\n');
             }
           }
 
@@ -1178,7 +1553,7 @@ app.command('/cat', async ({ ack, body, client }) => {
         } else if (messageType === 'help') {
           data = { type: 'help', text: templates.help, userModifiedText: false, alertChannels: [], scheduleType: 'schedule' };
         } else if (messageType === 'poll') {
-          data = { type: 'poll', text: '', title: '', pollType: 'single', pollOptions: 'Option 1\nOption 2', pollSettings: [], scheduleType: 'schedule' };
+          data = { type: 'poll', text: '', title: '', pollType: 'multiple', pollOptions: 'Option 1\nOption 2', pollSettings: [], scheduleType: 'schedule' };
         } else if (messageType === 'custom') {
           data = { type: 'custom', text: '', title: '', scheduleType: 'schedule' };
         }
@@ -1189,7 +1564,7 @@ app.command('/cat', async ({ ack, body, client }) => {
           data.userModifiedText = false;
         }
         if (messageType === 'poll') {
-          if (!data.pollType) data.pollType = 'single';
+          if (!data.pollType) data.pollType = 'multiple';
           if (!data.pollOptions) data.pollOptions = 'Option 1\nOption 2';
           if (!data.pollSettings) data.pollSettings = [];
         }
@@ -1364,7 +1739,7 @@ app.action('alert_channels_select', async ({ ack, body, client }) => {
   }
 });
 
-// Poll form handlers
+// Enhanced poll form handlers
 app.action('poll_type_radio', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1372,18 +1747,27 @@ app.action('poll_type_radio', async ({ ack, body, client }) => {
     const selectedType = body.actions[0].selected_option.value;
     let data = formData.get(userId) || {};
     data.pollType = selectedType;
-
-    if (selectedType === 'open') {
-      data.pollOptions = '';
-    }
-
     formData.set(userId, data);
+    
     await client.views.update({
       view_id: body.view.id,
       view: createModal('poll', data)
     });
   } catch (error) {
     console.error('Poll type radio error:', error);
+  }
+});
+
+app.action('poll_settings_checkboxes', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    let data = formData.get(userId) || {};
+    const selectedOptions = body.actions[0].selected_options || [];
+    data.pollSettings = selectedOptions.map(opt => opt.value);
+    formData.set(userId, data);
+  } catch (error) {
+    console.error('Poll settings error:', error);
   }
 });
 
@@ -1451,19 +1835,6 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
   }
 });
 
-app.action('poll_settings_checkboxes', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    let data = formData.get(userId) || {};
-    const selectedOptions = body.actions[0].selected_options || [];
-    data.pollSettings = selectedOptions.map(opt => opt.value);
-    formData.set(userId, data);
-  } catch (error) {
-    console.error('Poll settings error:', error);
-  }
-});
-
 // Modal submission handler
 app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
   if (body.view.callback_id === 'scheduler_schedule') {
@@ -1520,7 +1891,8 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
         channel: extractedChannel || data.channel,
         date: extractedDate || data.date || todayInEST(),
         time: extractedTime || data.time || '09:00',
-        repeat: extractedRepeat || data.repeat || 'none'
+        repeat: extractedRepeat || data.repeat || 'none',
+        createdBy: userId
       };
 
       if (data.type === 'help') {
@@ -1573,6 +1945,8 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
         }
       }
 
+      // Update user activity
+      updateUserActivity(userId);
       formData.delete(userId);
     } catch (error) {
       console.error('Error during modal processing:', error);
@@ -1610,7 +1984,7 @@ app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
   }
 });
 
-// FIXED POLL VOTING HANDLER WITH BETTER DEBUGGING
+// ENHANCED POLL VOTING HANDLER
 app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
   await ack();
   
@@ -1625,7 +1999,7 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
       throw new Error(`Invalid action_id format: ${action.action_id}. Expected: poll_vote_msgId_optionIndex`);
     }
     
-    const msgId = actionParts.slice(2, -1).join('_'); // Handle msgIds with underscores
+    const msgId = actionParts.slice(2, -1).join('_');
     const optionId = actionParts[actionParts.length - 1];
     const optionIndex = parseInt(optionId);
     
@@ -1649,13 +2023,11 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     if (!pollData && body.message?.blocks) {
       console.log('Poll data not found in storage, attempting to reconstruct from message');
       
-      // Extract title from first section block
       let reconstructedTitle = 'Poll';
       let reconstructedText = '';
       const extractedOptions = [];
       
       body.message.blocks.forEach(block => {
-        // Get title from first section
         if (block.type === 'section' && block.text?.text && !reconstructedTitle.includes('*')) {
           const titleMatch = block.text.text.match(/\*(.+?)\*/);
           if (titleMatch) {
@@ -1663,12 +2035,10 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
           }
         }
         
-        // Get description from second section (if exists)
         if (block.type === 'section' && block.text?.text && !block.text.text.includes('*') && !block.accessory) {
           reconstructedText = block.text.text;
         }
         
-        // Extract options from sections with buttons
         if (block.type === 'section' && block.accessory?.type === 'button') {
           const optionText = block.text.text.replace(/\*(.+?)\*/, '$1').trim();
           if (optionText && !extractedOptions.includes(optionText)) {
@@ -1714,19 +2084,16 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
     const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
     console.log(`Poll options:`, options);
 
-    // CRITICAL: Ensure poll data is stored in activePollMessages for future updates
     if (messageTs && !activePollMessages.has(messageTs)) {
       activePollMessages.set(messageTs, pollData);
       console.log(`Stored poll data in activePollMessages for ${messageTs}`);
     }
 
-    // CRITICAL FIX: Initialize vote tracking completely
     if (!pollVotes[msgId]) {
       pollVotes[msgId] = {};
       console.log(`Created new vote tracking for msgId: ${msgId}`);
     }
 
-    // Ensure ALL option indices exist as Sets
     for (let i = 0; i < options.length; i++) {
       if (!pollVotes[msgId][i]) {
         pollVotes[msgId][i] = new Set();
@@ -1734,7 +2101,6 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
       }
     }
 
-    // Validate option index
     if (optionIndex < 0 || optionIndex >= options.length) {
       console.error(`Invalid option index: ${optionIndex} for poll with ${options.length} options`);
       try {
@@ -1749,7 +2115,6 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
       return;
     }
 
-    // Double-check that the specific option exists
     if (!pollVotes[msgId][optionIndex]) {
       pollVotes[msgId][optionIndex] = new Set();
       console.log(`Created missing vote set for option ${optionIndex}`);
@@ -1757,18 +2122,42 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
 
     console.log(`Vote tracking state for ${msgId}:`, Object.keys(pollVotes[msgId]));
 
-    // Multiple choice logic - toggle vote for this option only
-    if (pollVotes[msgId][optionIndex].has(user)) {
-      pollVotes[msgId][optionIndex].delete(user);
-      console.log(`Removed vote from option ${optionIndex}`);
-      userVoteChanged = true;
+    let userVoteChanged = false;
+
+    // Handle voting logic based on poll type
+    if (pollData.pollType === 'single') {
+      // Single choice: remove from all other options first
+      Object.keys(pollVotes[msgId]).forEach(idx => {
+        if (parseInt(idx) !== optionIndex && pollVotes[msgId][idx].has(user)) {
+          pollVotes[msgId][idx].delete(user);
+          userVoteChanged = true;
+        }
+      });
+      
+      // Toggle vote for this option
+      if (pollVotes[msgId][optionIndex].has(user)) {
+        pollVotes[msgId][optionIndex].delete(user);
+        console.log(`Removed vote from option ${optionIndex} (single choice)`);
+        userVoteChanged = true;
+      } else {
+        pollVotes[msgId][optionIndex].add(user);
+        console.log(`Added vote to option ${optionIndex} (single choice)`);
+        userVoteChanged = true;
+      }
     } else {
-      pollVotes[msgId][optionIndex].add(user);
-      console.log(`Added vote to option ${optionIndex}`);
-      userVoteChanged = true;
+      // Multiple choice: toggle vote for this option only
+      if (pollVotes[msgId][optionIndex].has(user)) {
+        pollVotes[msgId][optionIndex].delete(user);
+        console.log(`Removed vote from option ${optionIndex} (multiple choice)`);
+        userVoteChanged = true;
+      } else {
+        pollVotes[msgId][optionIndex].add(user);
+        console.log(`Added vote to option ${optionIndex} (multiple choice)`);
+        userVoteChanged = true;
+      }
     }
 
-    // Update the poll message with new vote counts using REAL data
+    // Update the poll message with new vote counts
     if (userVoteChanged && messageTs && channel) {
       console.log('About to update poll message with vote data:', JSON.stringify(pollVotes[msgId], null, 2));
       await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
@@ -1960,7 +2349,7 @@ cron.schedule('0 * * * *', () => {
   try {
     const keepAliveServer = require('http').createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('PM Squad Bot is running!');
+      res.end('PM Squad Bot Enhanced is running!');
     });
 
     const PORT = process.env.PORT || 3000;
@@ -1968,13 +2357,17 @@ cron.schedule('0 * * * *', () => {
       console.log(`Keep-alive server running on port ${PORT}`);
     });
 
+    // Reschedule existing jobs
+    scheduledMessages.forEach(msg => scheduleJob(msg));
+
     await app.start();
     
-    console.log('PM Squad Bot "Cat Scratch" is running! (Clean Version)');
+    console.log('PM Squad Bot "Cat Scratch" Enhanced Version is running!');
     console.log(`Loaded ${scheduledMessages.length} scheduled messages`);
     console.log(`Active jobs: ${jobs.size}`);
     console.log(`Current EST time: ${currentTimeInEST()}`);
     console.log(`Current EST date: ${todayInEST()}`);
+    console.log(`User data entries: ${Object.keys(userData).length}`);
 
     if (scheduledMessages.length > 0) {
       console.log('Scheduled Messages:');
@@ -1986,7 +2379,13 @@ cron.schedule('0 * * * *', () => {
       });
     }
 
-    console.log('All systems ready! Use /cat to start.');
+    console.log('Available commands:');
+    console.log('  /cat - Main menu');
+    console.log('  /capacity - Direct capacity check');
+    console.log('  /help - Direct help button');
+    console.log('  /poll - Direct poll creation');
+    console.log('  /manage - Message management');
+    console.log('All systems ready!');
   } catch (error) {
     console.error('Failed to start app:', error);
     process.exit(1);
