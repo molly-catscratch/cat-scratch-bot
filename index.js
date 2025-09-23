@@ -816,15 +816,17 @@ function createModal(page, data = {}) {
           element: {
             type: 'checkboxes',
             action_id: 'poll_settings_checkboxes',
-            initial_options: data.pollSettings?.filter(setting => setting !== 'anonymous').map(setting => ({
-              text: { 
-                type: 'plain_text', 
-                text: setting === 'hidden' ? '👁️‍🗨️ Hide results until poll closes' :
-                      setting === 'limited' ? '📊 Limit votes per person' :
-                      setting === 'allow_add' ? '➕ Let others add options' : setting
-              },
-              value: setting
-            })) || [],
+            ...(data.pollSettings && data.pollSettings.length > 0 ? {
+              initial_options: data.pollSettings.filter(setting => setting !== 'anonymous').map(setting => ({
+                text: { 
+                  type: 'plain_text', 
+                  text: setting === 'hidden' ? '👁️‍🗨️ Hide results until poll closes' :
+                        setting === 'limited' ? '📊 Limit votes per person' :
+                        setting === 'allow_add' ? '➕ Let others add options' : setting
+                },
+                value: setting
+              }))
+            } : {}),
             options: [
               { text: { type: 'plain_text', text: '👁️‍🗨️ Hide results until poll closes' }, value: 'hidden' },
               { text: { type: 'plain_text', text: '📊 Limit votes per person' }, value: 'limited' },
