@@ -259,32 +259,15 @@ function createAppHome(userId) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Welcome to Cat Scratch!* ${cat()}\n${user.isExperienced ? 'Quick actions below:' : 'Choose an action to get started:'}`
+        text: `*Welcome to Cat Scratch!*\n\nYour friendly neighborhood bot for PM team communications. I help you create capacity checks, help buttons, polls, and custom messages - all with the scheduling power of a cat with a very organized calendar.`
       }
     },
-    { type: 'divider' }
-  ];
-
-  if (!user.isExperienced) {
-    blocks.push(
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: '*Getting Started*\nCat Scratch helps you manage team communications. You can create capacity checks, help buttons, polls, and custom messages - all with flexible scheduling options.'
-        }
-      },
-      { type: 'divider' }
-    );
-  }
-
-  // Quick action buttons
-  blocks.push(
+    { type: 'divider' },
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: '*Quick Actions*'
+        text: '*Quick Actions*\nJump right into creating messages:'
       }
     },
     {
@@ -318,24 +301,40 @@ function createAppHome(userId) {
           action_id: 'home_custom'
         }
       ]
-    }
-  );
-
-  // Statistics for experienced users
-  if (user.isExperienced) {
-    blocks.push(
-      { type: 'divider' },
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `*Your Activity*\n• Messages created: ${user.totalMessages}\n• Scheduled messages: ${userMessages.length}\n• Member since: ${new Date(user.firstSeen).toLocaleDateString()}`
-        }
+    },
+    { type: 'divider' },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*Slash Commands*\nBecause sometimes typing is faster than clicking:'
       }
-    );
-  }
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '`/cat` - Opens the main menu for creating any type of message\n`/capacity` - Quick capacity check creation\n`/help` - Create a help button for your team\n`/poll` - Start building a poll right away\n`/manage` - View and manage your scheduled messages'
+      }
+    },
+    { type: 'divider' },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*What Can I Do?*'
+      }
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*Capacity Checks* - Get quick team bandwidth updates with reaction-based responses\n*Help Buttons* - Let team members call for backup when they need it\n*Polls* - Create single or multiple choice polls with real-time voting\n*Custom Messages* - Send any message, with or without scheduling\n*Smart Scheduling* - Post now, schedule for later, or set up recurring messages'
+      }
+    }
+  ];
 
-  // Management section
+  // Show management section if user has scheduled messages
   if (scheduledMessages.length > 0) {
     blocks.push(
       { type: 'divider' },
@@ -343,12 +342,26 @@ function createAppHome(userId) {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*Management*\n${scheduledMessages.length} total scheduled messages`
+          text: `*Message Management*\nYou have ${userMessages.length} scheduled message${userMessages.length !== 1 ? 's' : ''} (${scheduledMessages.length} total across your team)`
         },
         accessory: {
           type: 'button',
-          text: { type: 'plain_text', text: 'Manage' },
+          text: { type: 'plain_text', text: 'Manage Messages' },
           action_id: 'home_manage'
+        }
+      }
+    );
+  }
+
+  // Add getting started tip for new users
+  if (!user.isExperienced) {
+    blocks.push(
+      { type: 'divider' },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: '*New to Cat Scratch?*\nStart with a quick `/capacity` command to see how easy team communication can be. Like a cat, I make everything look effortless.'
         }
       }
     );
@@ -381,17 +394,10 @@ function createModal(page, data = {}) {
           type: 'header', 
           text: { 
             type: 'plain_text', 
-            text: 'Choose Your Message Type' 
+            text: 'Create New Message' 
           }
         },
         { type: 'divider' },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*Team Communication Tools*'
-          }
-        },
         {
           type: 'actions',
           elements: [
@@ -400,22 +406,12 @@ function createModal(page, data = {}) {
               style: 'primary',
               text: { type: 'plain_text', text: 'Capacity Check' }, 
               action_id: 'nav_capacity' 
-            }
-          ]
-        },
-        {
-          type: 'actions',
-          elements: [
+            },
             { 
               type: 'button', 
               style: 'danger',
               text: { type: 'plain_text', text: 'Help Button' }, 
               action_id: 'nav_help' 
-            },
-            { 
-              type: 'button', 
-              text: { type: 'plain_text', text: 'Custom Message' }, 
-              action_id: 'nav_custom' 
             }
           ]
         },
@@ -426,15 +422,20 @@ function createModal(page, data = {}) {
               type: 'button', 
               text: { type: 'plain_text', text: 'Create Poll' }, 
               action_id: 'nav_poll' 
+            },
+            { 
+              type: 'button', 
+              text: { type: 'plain_text', text: 'Custom Message' }, 
+              action_id: 'nav_custom' 
             }
           ]
         },
         { type: 'divider' },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: '*Management*'
+        { 
+          type: 'header', 
+          text: { 
+            type: 'plain_text', 
+            text: 'Message Management' 
           }
         },
         {
@@ -707,12 +708,6 @@ function createModal(page, data = {}) {
             type: 'button', 
             text: { type: 'plain_text', text: 'Back to Preview' }, 
             action_id: 'nav_preview' 
-          },
-          {
-            type: 'button',
-            style: 'primary',
-            text: { type: 'plain_text', text: 'Post Message' },
-            action_id: 'submit_message'
           }
         ]
       }
@@ -795,7 +790,7 @@ function createModal(page, data = {}) {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: '*Poll Type*'
+            text: '*How should people vote?*'
           }
         },
         {
@@ -806,99 +801,143 @@ function createModal(page, data = {}) {
             type: 'radio_buttons',
             action_id: 'poll_type_radio',
             initial_option: data.pollType === 'single' ?
-              { text: { type: 'plain_text', text: 'Single choice (one vote per person)' }, value: 'single' } :
-              data.pollType === 'multiple' ?
-              { text: { type: 'plain_text', text: 'Multiple choice (multiple votes allowed)' }, value: 'multiple' } :
-              { text: { type: 'plain_text', text: 'Multiple choice (multiple votes allowed)' }, value: 'multiple' },
+              { text: { type: 'plain_text', text: '🔘 Single choice - voters pick one option' }, value: 'single' } :
+              { text: { type: 'plain_text', text: '🔲 Multiple choice - voters can pick several options' }, value: 'multiple' },
             options: [
-              { text: { type: 'plain_text', text: 'Single choice (one vote per person)' }, value: 'single' },
-              { text: { type: 'plain_text', text: 'Multiple choice (multiple votes allowed)' }, value: 'multiple' }
+              { text: { type: 'plain_text', text: '🔘 Single choice - voters pick one option' }, value: 'single' },
+              { text: { type: 'plain_text', text: '🔲 Multiple choice - voters can pick several options' }, value: 'multiple' }
             ]
           }
         },
         {
           type: 'input',
           block_id: 'poll_settings_section',
-          label: { type: 'plain_text', text: 'Poll Settings' },
+          label: { type: 'plain_text', text: 'Poll Settings (optional)' },
           element: {
             type: 'checkboxes',
             action_id: 'poll_settings_checkboxes',
-            initial_options: data.pollSettings?.map(setting => ({
-              text: { type: 'plain_text', text: setting === 'show_counts' ? 'Show vote counts' : setting === 'anonymous' ? 'Anonymous voting' : setting },
+            initial_options: data.pollSettings?.filter(setting => setting !== 'anonymous').map(setting => ({
+              text: { 
+                type: 'plain_text', 
+                text: setting === 'hidden' ? '👁️‍🗨️ Hide results until poll closes' :
+                      setting === 'limited' ? '📊 Limit votes per person' :
+                      setting === 'allow_add' ? '➕ Let others add options' : setting
+              },
               value: setting
             })) || [],
             options: [
-              { text: { type: 'plain_text', text: 'Show vote counts' }, value: 'show_counts' },
-              { text: { type: 'plain_text', text: 'Anonymous voting' }, value: 'anonymous' }
+              { text: { type: 'plain_text', text: '👁️‍🗨️ Hide results until poll closes' }, value: 'hidden' },
+              { text: { type: 'plain_text', text: '📊 Limit votes per person' }, value: 'limited' },
+              { text: { type: 'plain_text', text: '➕ Let others add options' }, value: 'allow_add' }
             ]
           },
           optional: true
         }
       );
 
-      // Poll options section
-      if (data.pollType !== 'open') {
-        commonBlocks.push(
-          { type: 'divider' },
-          { 
-            type: 'section', 
-            text: { 
-              type: 'mrkdwn', 
-              text: '*Poll Options*' 
-            }
+      // Vote limit input (conditional)
+      if (data.pollSettings?.includes('limited')) {
+        commonBlocks.push({
+          type: 'input',
+          block_id: 'vote_limit_section',
+          label: { type: 'plain_text', text: 'Maximum votes per person' },
+          element: {
+            type: 'number_input',
+            action_id: 'vote_limit_input',
+            initial_value: data.limit?.toString() || '1',
+            min_value: '1',
+            max_value: '10'
           }
-        );
-
-        const options = data.pollOptions ?
-          data.pollOptions.split('\n').filter(o => o.trim()) :
-          ['Option 1', 'Option 2'];
-
-        while (options.length < 2) {
-          options.push(`Option ${options.length + 1}`);
-        }
-
-        options.forEach((option, index) => {
-          commonBlocks.push({
-            type: 'input',
-            block_id: `option_${index}_block`,
-            label: { type: 'plain_text', text: `Option ${index + 1}` },
-            element: {
-              type: 'plain_text_input',
-              action_id: `option_${index}_input`,
-              initial_value: option || '',
-              placeholder: { type: 'plain_text', text: `Enter option ${index + 1}...` }
-            },
-            optional: index >= 2
-          });
         });
+      }
 
-        const actionElements = [];
-
-        if (options.length < 10) {
-          actionElements.push({
-            type: 'button',
-            style: 'primary',
-            text: { type: 'plain_text', text: 'Add Option' },
-            action_id: 'add_poll_option',
-            value: 'add'
-          });
+      // Poll options section
+      commonBlocks.push(
+        { type: 'divider' },
+        { 
+          type: 'section', 
+          text: { 
+            type: 'mrkdwn', 
+            text: '*Poll Options*\nAdd 2-10 options for people to vote on:' 
+          }
         }
+      );
 
-        if (options.length > 2) {
-          actionElements.push({
-            type: 'button',
-            text: { type: 'plain_text', text: 'Remove Last Option' },
-            action_id: 'remove_poll_option',
-            style: 'danger',
-            value: 'remove'
-          });
-        }
+      const options = data.pollOptions ?
+        data.pollOptions.split('\n').filter(o => o.trim()) :
+        ['', ''];
 
-        if (actionElements.length > 0) {
-          commonBlocks.push({
-            type: 'actions',
-            elements: actionElements
-          });
+      // Ensure we have at least 2 options
+      while (options.length < 2) {
+        options.push('');
+      }
+
+      options.forEach((option, index) => {
+        commonBlocks.push({
+          type: 'input',
+          block_id: `option_${index}_block`,
+          label: { type: 'plain_text', text: `${index + 1}.` },
+          element: {
+            type: 'plain_text_input',
+            action_id: `option_${index}_input`,
+            initial_value: option || '',
+            placeholder: { type: 'plain_text', text: `Enter option ${index + 1}...` }
+          },
+          optional: index >= 2
+        });
+      });
+
+      // Dynamic option management buttons
+      const actionElements = [];
+
+      if (options.length < 10) {
+        actionElements.push({
+          type: 'button',
+          style: 'primary',
+          text: { type: 'plain_text', text: '➕ Add Option' },
+          action_id: 'add_poll_option',
+          value: 'add'
+        });
+      }
+
+      if (options.length > 2) {
+        actionElements.push({
+          type: 'button',
+          text: { type: 'plain_text', text: '➖ Remove Last' },
+          action_id: 'remove_poll_option',
+          style: 'danger',
+          value: 'remove'
+        });
+      }
+
+      if (actionElements.length > 0) {
+        commonBlocks.push({
+          type: 'actions',
+          elements: actionElements
+        });
+      }
+
+      // Preview section
+      if (data.pollOptions && data.pollOptions.trim()) {
+        const previewOptions = data.pollOptions.split('\n').filter(o => o.trim());
+        if (previewOptions.length >= 2) {
+          commonBlocks.push(
+            { type: 'divider' },
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: '*Preview:*'
+              }
+            },
+            {
+              type: 'section',
+              text: {
+                type: 'mrkdwn',
+                text: `*${data.title || 'Poll Question'}*\n${data.text || ''}\n\n${previewOptions.map((opt, i) => `${i + 1}. ${opt}`).join('\n')}\n\n_${data.pollType === 'single' ? '🔘 Single choice' : '🔲 Multiple choice'} poll_`
+              }
+            }
+          );
         }
       }
 
@@ -959,8 +998,11 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
     console.log('Updating poll message:', { channel, messageTs, pollData: pollData.id });
     
     const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
-    const showCounts = pollData.pollSettings?.includes('show_counts') || false;
-    const anonymous = pollData.pollSettings?.includes('anonymous') || false;
+    const showCounts = pollData.pollSettings?.includes('show_counts') !== false; // Default to true
+    const isHidden = pollData.pollSettings?.includes('hidden') || false;
+    const isLimited = pollData.pollSettings?.includes('limited') || false;
+    const limit = pollData.limit || 1;
+    const isClosed = pollData.isClosed || false;
     
     let blocks = [
       { 
@@ -968,6 +1010,28 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
         text: { 
           type: 'mrkdwn', 
           text: `*${pollData.title || 'Poll'}*${cat()}`
+        },
+        accessory: {
+          type: 'overflow',
+          action_id: 'poll_menu',
+          options: [
+            {
+              text: { type: 'plain_text', text: isHidden ? 'Reveal Results' : 'Hide Results' },
+              value: JSON.stringify({ action: 'toggle_hidden', pollId: pollData.id, createdBy: pollData.createdBy })
+            },
+            {
+              text: { type: 'plain_text', text: isClosed ? 'Reopen Poll' : 'Close Poll' },
+              value: JSON.stringify({ action: 'toggle_closed', pollId: pollData.id, createdBy: pollData.createdBy })
+            },
+            {
+              text: { type: 'plain_text', text: 'View All Votes' },
+              value: JSON.stringify({ action: 'view_votes', pollId: pollData.id, createdBy: pollData.createdBy })
+            },
+            {
+              text: { type: 'plain_text', text: 'Delete Poll' },
+              value: JSON.stringify({ action: 'delete_poll', pollId: pollData.id, createdBy: pollData.createdBy })
+            }
+          ]
         }
       }
     ];
@@ -982,18 +1046,47 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
       });
     }
 
+    // Poll status indicators
+    let statusElements = [];
+    if (pollData.pollType === 'single') {
+      statusElements.push({ type: 'mrkdwn', text: '🔘 Single choice' });
+    } else {
+      statusElements.push({ type: 'mrkdwn', text: '🔲 Multiple choice' });
+    }
+    
+    if (isLimited) {
+      statusElements.push({ type: 'mrkdwn', text: `📊 Max ${limit} choice${limit !== 1 ? 's' : ''}` });
+    }
+    
+    if (isHidden) {
+      statusElements.push({ type: 'mrkdwn', text: '👁️‍🗨️ Results hidden' });
+    }
+    
+    if (isClosed) {
+      statusElements.push({ type: 'mrkdwn', text: '🔒 Poll closed' });
+    }
+    
+    statusElements.push({ type: 'mrkdwn', text: `👤 Created by <@${pollData.createdBy}>` });
+
+    blocks.push({
+      type: 'context',
+      elements: statusElements
+    });
+
     blocks.push({ type: 'divider' });
 
     if (options.length > 0) {
-      // Enhanced option blocks with individual vote counts
+      // Enhanced option blocks with vote buttons and real-time counts
       options.forEach((option, idx) => {
         const voteCount = votes[idx] ? votes[idx].size : 0;
         const voters = votes[idx] ? Array.from(votes[idx]) : [];
         
-        let optionText = `*${option}*`;
+        // Create vote button with different styles based on poll state
+        let buttonStyle = undefined;
+        let buttonText = 'Vote';
         
-        if (showCounts) {
-          optionText += ` (${voteCount} vote${voteCount !== 1 ? 's' : ''})`;
+        if (isClosed) {
+          buttonText = 'Closed';
         }
         
         // Option section with vote button
@@ -1001,56 +1094,81 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: optionText
+            text: `*${idx + 1}.* ${option}`
           },
           accessory: {
             type: 'button',
             text: {
               type: 'plain_text',
-              text: 'Vote'
+              text: buttonText
             },
-            action_id: `poll_vote_${pollData.id}_${idx}`,
-            value: `${idx}`
+            style: buttonStyle,
+            action_id: isClosed ? 'poll_closed' : `poll_vote_${pollData.id}_${idx}`,
+            value: JSON.stringify({ 
+              optionIndex: idx, 
+              pollId: pollData.id, 
+              pollType: pollData.pollType,
+              isLimited: isLimited,
+              limit: limit
+            })
           }
         });
 
-        // Vote details context
-        if (showCounts && voteCount > 0 && !anonymous) {
-          const voterNames = voters.map(userId => `<@${userId}>`).join(', ');
+        // Vote display logic
+        if (isHidden && !isClosed) {
           blocks.push({
             type: 'context',
             elements: [{
               type: 'mrkdwn',
-              text: voterNames
+              text: '👁️ Results hidden until poll closes'
             }]
           });
-        } else if (showCounts && voteCount > 0 && anonymous) {
+        } else if (voteCount === 0) {
           blocks.push({
             type: 'context',
             elements: [{
               type: 'mrkdwn',
-              text: `${voteCount} vote${voteCount !== 1 ? 's' : ''}`
+              text: '📊 No votes yet'
             }]
           });
         } else {
-          blocks.push({
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: 'No votes'
-            }]
-          });
+          // Show vote count and voters
+          const countText = `📊 ${voteCount} vote${voteCount !== 1 ? 's' : ''}`;
+          const voterText = voters.length > 0 ? voters.map(userId => `<@${userId}>`).join(', ') : '';
+          
+          if (voterText) {
+            blocks.push({
+              type: 'context',
+              elements: [{
+                type: 'mrkdwn',
+                text: `${countText}: ${voterText}`
+              }]
+            });
+          } else {
+            blocks.push({
+              type: 'context',
+              elements: [{
+                type: 'mrkdwn',
+                text: countText
+              }]
+            });
+          }
         }
       });
     }
 
     blocks.push({ type: 'divider' });
 
-    // Footer with poll info
+    // Enhanced footer with comprehensive poll info
     const totalVotes = Object.values(votes).reduce((sum, voteSet) => sum + voteSet.size, 0);
+    const totalVoters = new Set(Object.values(votes).flatMap(voteSet => Array.from(voteSet))).size;
     const voteTypeText = pollData.pollType === 'single' ? 'Single choice' : 'Multiple choice';
     
-    let footerText = `${voteTypeText} poll • ${totalVotes} total vote${totalVotes !== 1 ? 's' : ''} • Click again to unvote`;
+    let footerText = `${voteTypeText} • ${totalVotes} total vote${totalVotes !== 1 ? 's' : ''} from ${totalVoters} voter${totalVoters !== 1 ? 's' : ''}`;
+    
+    if (!isClosed) {
+      footerText += ' • Click vote button to vote, click again to remove vote';
+    }
     
     blocks.push({
       type: 'context',
@@ -1758,6 +1876,25 @@ app.action('poll_type_radio', async ({ ack, body, client }) => {
   }
 });
 
+// Enhanced poll form handlers
+app.action('poll_type_radio', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const selectedType = body.actions[0].selected_option.value;
+    let data = formData.get(userId) || {};
+    data.pollType = selectedType;
+    formData.set(userId, data);
+    
+    await client.views.update({
+      view_id: body.view.id,
+      view: createModal('poll', data)
+    });
+  } catch (error) {
+    console.error('Poll type radio error:', error);
+  }
+});
+
 app.action('poll_settings_checkboxes', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1766,8 +1903,26 @@ app.action('poll_settings_checkboxes', async ({ ack, body, client }) => {
     const selectedOptions = body.actions[0].selected_options || [];
     data.pollSettings = selectedOptions.map(opt => opt.value);
     formData.set(userId, data);
+    
+    await client.views.update({
+      view_id: body.view.id,
+      view: createModal('poll', data)
+    });
   } catch (error) {
     console.error('Poll settings error:', error);
+  }
+});
+
+app.action('vote_limit_input', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    let data = formData.get(userId) || {};
+    const limitValue = body.actions[0].value;
+    data.limit = parseInt(limitValue) || 1;
+    formData.set(userId, data);
+  } catch (error) {
+    console.error('Vote limit input error:', error);
   }
 });
 
@@ -1786,11 +1941,12 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
       index++;
     }
 
-    if (!options[options.length - 1]) {
-      options[options.length - 1] = `Option ${options.length}`;
-    } else {
-      options.push(`Option ${options.length + 1}`);
+    // Ensure current options are saved
+    while (options.length < index) {
+      options.push('');
     }
+    
+    options.push(''); // Add new empty option
 
     data.pollOptions = options.join('\n');
     formData.set(userId, data);
@@ -1833,6 +1989,226 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
   } catch (error) {
     console.error('Remove poll option error:', error);
   }
+});
+
+// Enhanced Poll Management Actions
+app.action('poll_menu', async ({ ack, body, client }) => {
+  await ack();
+  
+  try {
+    const selectedOption = body.actions[0].selected_option;
+    const actionData = JSON.parse(selectedOption.value);
+    const user = body.user.id;
+    const channel = body.channel?.id;
+    const messageTs = body.message?.ts;
+
+    // Check if user is authorized for this action
+    if (actionData.createdBy !== user) {
+      await client.chat.postEphemeral({
+        channel: channel || user,
+        user: user,
+        text: 'Only the poll creator can perform this action.'
+      });
+      return;
+    }
+
+    const pollData = activePollMessages.get(messageTs);
+    if (!pollData) {
+      await client.chat.postEphemeral({
+        channel: channel || user,
+        user: user,
+        text: 'Poll data not found. The poll may have been deleted.'
+      });
+      return;
+    }
+
+    switch (actionData.action) {
+      case 'toggle_hidden':
+        await togglePollHidden(client, channel, messageTs, pollData, user);
+        break;
+      case 'toggle_closed':
+        await togglePollClosed(client, channel, messageTs, pollData, user);
+        break;
+      case 'view_votes':
+        await showVotesSummary(client, body.trigger_id, messageTs, pollData);
+        break;
+      case 'delete_poll':
+        await confirmDeletePoll(client, body.trigger_id, messageTs, pollData, user);
+        break;
+    }
+  } catch (error) {
+    console.error('Poll menu error:', error);
+  }
+});
+
+// Poll Management Functions
+async function togglePollHidden(client, channel, messageTs, pollData, userId) {
+  try {
+    pollData.pollSettings = pollData.pollSettings || [];
+    const isHidden = pollData.pollSettings.includes('hidden');
+    
+    if (isHidden) {
+      pollData.pollSettings = pollData.pollSettings.filter(s => s !== 'hidden');
+    } else {
+      pollData.pollSettings.push('hidden');
+    }
+    
+    activePollMessages.set(messageTs, pollData);
+    await updatePollMessage(client, channel, messageTs, pollData, pollVotes[pollData.id] || {});
+    
+    await client.chat.postEphemeral({
+      channel: channel,
+      user: userId,
+      text: isHidden ? 'Poll results are now visible!' : 'Poll results are now hidden!'
+    });
+  } catch (error) {
+    console.error('Toggle hidden error:', error);
+  }
+}
+
+async function togglePollClosed(client, channel, messageTs, pollData, userId) {
+  try {
+    pollData.isClosed = !pollData.isClosed;
+    activePollMessages.set(messageTs, pollData);
+    await updatePollMessage(client, channel, messageTs, pollData, pollVotes[pollData.id] || {});
+    
+    await client.chat.postEphemeral({
+      channel: channel,
+      user: userId,
+      text: pollData.isClosed ? 'Poll has been closed!' : 'Poll has been reopened!'
+    });
+  } catch (error) {
+    console.error('Toggle closed error:', error);
+  }
+}
+
+async function showVotesSummary(client, triggerId, messageTs, pollData) {
+  try {
+    const votes = pollVotes[pollData.id] || {};
+    const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
+    
+    let blocks = [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Vote Summary: ${pollData.title}*`
+        }
+      },
+      { type: 'divider' }
+    ];
+
+    const totalVotes = Object.values(votes).reduce((sum, voteSet) => sum + (voteSet?.size || 0), 0);
+    const totalVoters = new Set(Object.values(votes).flatMap(voteSet => Array.from(voteSet || []))).size;
+    
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `📊 *${totalVotes}* total votes from *${totalVoters}* voters`
+      }
+    });
+
+    blocks.push({ type: 'divider' });
+
+    options.forEach((option, idx) => {
+      const voteCount = votes[idx]?.size || 0;
+      const voters = votes[idx] ? Array.from(votes[idx]) : [];
+      const percentage = totalVotes > 0 ? Math.round((voteCount / totalVotes) * 100) : 0;
+      
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*${idx + 1}. ${option}*\n${voteCount} votes (${percentage}%)`
+        }
+      });
+      
+      if (voters.length > 0) {
+        blocks.push({
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: voters.map(userId => `<@${userId}>`).join(', ')
+          }]
+        });
+      }
+    });
+
+    await client.views.open({
+      trigger_id: triggerId,
+      view: {
+        type: 'modal',
+        title: { type: 'plain_text', text: 'Vote Summary' },
+        close: { type: 'plain_text', text: 'Close' },
+        blocks: blocks
+      }
+    });
+  } catch (error) {
+    console.error('Show votes summary error:', error);
+  }
+}
+
+async function confirmDeletePoll(client, triggerId, messageTs, pollData, userId) {
+  try {
+    await client.views.open({
+      trigger_id: triggerId,
+      view: {
+        type: 'modal',
+        callback_id: 'confirm_delete_poll',
+        private_metadata: JSON.stringify({ messageTs, pollId: pollData.id, userId }),
+        title: { type: 'plain_text', text: 'Delete Poll?' },
+        submit: { type: 'plain_text', text: 'Delete' },
+        close: { type: 'plain_text', text: 'Cancel' },
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `Are you sure you want to delete the poll "*${pollData.title}*"?\n\nThis action cannot be undone.`
+            }
+          }
+        ]
+      }
+    });
+  } catch (error) {
+    console.error('Confirm delete poll error:', error);
+  }
+}
+
+// Handle poll deletion confirmation
+app.view('confirm_delete_poll', async ({ ack, body, view, client }) => {
+  await ack();
+  
+  try {
+    const metadata = JSON.parse(view.private_metadata);
+    const { messageTs, pollId, userId } = metadata;
+    
+    // Remove from active polls
+    activePollMessages.delete(messageTs);
+    
+    // Remove vote data
+    delete pollVotes[pollId];
+    
+    await client.chat.postEphemeral({
+      channel: body.user.id,
+      user: userId,
+      text: 'Poll has been deleted successfully!'
+    });
+  } catch (error) {
+    console.error('Delete poll confirmation error:', error);
+  }
+});
+
+// Handle when someone tries to vote on a closed poll
+app.action('poll_closed', async ({ ack, body, client }) => {
+  await ack();
+  
+  await client.chat.postEphemeral({
+    channel: body.channel?.id || body.user.id,
+    user: body.user.id,
+    text: 'This poll has been closed and is no longer accepting votes.'
+  });
 });
 
 // Modal submission handler
