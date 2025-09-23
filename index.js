@@ -57,7 +57,481 @@ function loadMessages() {
     try {
       const data = JSON.parse(fs.readFileSync(SCHEDULE_FILE));
       scheduledMessages = data.filter(msg => {
-        if (msg.repeat !== 'none') return true;
+        if (!data.id) {
+        data.id = generateId();
+      }
+
+      const finalScheduleType = data.scheduleType || 'schedule';
+
+      if (finalScheduleType === 'now') {
+        const success = await sendMessage(data);
+        const resultMessage = success ?
+          `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message posted to <#${data.channel}>!${cat()}` :
+          `Failed to post message. Please check that I'm invited to <#${data.channel}>.${cat()}`;
+
+        try {
+          await client.chat.postEphemeral({
+            channel: body.user.id,
+            user: userId,
+            text: resultMessage
+          });
+        } catch (e) {
+          console.log('Could not send ephemeral result message.');
+        }
+      } else {
+        const existingIndex = scheduledMessages.findIndex(m => m.id === data.id);
+        if (existingIndex >= 0) {
+          scheduledMessages[existingIndex] = data;
+        } else {
+          scheduledMessages.push(data);
+        }
+
+        saveMessages();
+        scheduleJob(data);
+
+        const successMessage = `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`;
+
+        try {
+          await client.chat.postEphemeral({
+            channel: body.user.id,
+            user: userId,
+            text: successMessage
+          });
+        } catch (e) {
+          console.log('Could not send ephemeral scheduling confirmation.');
+        }
+      }
+
+      updateUserActivity(userId);
+      formData.delete(userId);
+    } catch (error) {
+      console.error('Error during modal processing:', error);
+      await ack({
+        response_action: 'errors',
+        errors: { 'channel_block': 'An error occurred processing your request. Please try again.' }
+      });
+    }
+  } else {
+    await ack();
+  }
+});
+
+app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
+  await ack();
+  try {
+    const msgId = action.value;
+    scheduledMessages = scheduledMessages.filter(msg => msg.id !== msgId);
+
+    if (jobs.has(msgId)) {
+      try {
+        jobs.get(msgId).destroy();
+      } catch (_) {}
+      jobs.delete(msgId);
+    }
+
+    saveMessages();
+    await client.views.update({
+      view_id: body.view.id,
+      view: createModal('scheduled')
+    });
+  } catch (error) {
+    console.error('Delete message error:', error);
+  }
+});
+
+app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
+  await ack();
+  
+  try {
+    console.log('Raw action_id received:', action.action_id);
+    console.log('Action value:', action.value);
+    
+    const actionParts = action.action_id.split('_');
+    console.log('Action parts:', actionParts);
+    
+    if (actionParts.length < 4) {
+      throw new Error(`Invalid action_id format: ${action.action_id}. Expected: poll_vote_msgId_optionIndex`);
+    }
+    
+    const msgId = actionParts.slice(2, -1).join('_');
+    const optionId = actionParts[actionParts.length - 1];
+    const optionIndex = parseInt(optionId);
+    
+    const user = body.user.id;
+    const channel = body.channel && body.channel.id;
+    const messageTs = body.message && body.message.ts;
+
+    console.log(`Poll vote parsed: msgId=${msgId}, optionId=${optionId}, optionIndex=${optionIndex}, user=${user}, messageTs=${messageTs}`);
+
+    if (isNaN(optionIndex)) {
+      throw new Error(`Invalid option index: ${optionId} is not a number`);
+    }
+
+    let pollData = scheduledMessages.find(m => m.id === msgId);
+    if (!pollData && messageTs) {
+      pollData = activePollMessages.get(messageTs);
+    }
+    
+    if (!pollData && body.message && body.message.blocks) {
+      console.log('Poll data not found in storage, attempting to reconstruct from message');
+      
+      let reconstructedTitle = 'Poll';
+      let reconstructedText = '';
+      const extractedOptions = [];
+      
+      body.message.blocks.forEach(block => {
+        if (block.type === 'section' && block.text && block.text.text && !reconstructedTitle.includes('*')) {
+          const titleMatch = block.text.text.match(/\*(.+?)\*/);
+          if (titleMatch) {
+            reconstructedTitle = titleMatch[1].replace(/₍\^. \.\^₎/, '').trim();
+          }
+        }
+        
+        if (block.type === 'section' && block.text && block.text.text && !block.text.text.includes('*') && !block.accessory) {
+          reconstructedText = block.text.text;
+        }
+        
+        if (block.type === 'section' && block.accessory && block.accessory.type === 'button') {
+          const optionText = block.text.text.replace(/\*(.+?)\*/, '$1').trim();
+          if (optionText && !extractedOptions.includes(optionText)) {
+            extractedOptions.push(optionText);
+          }
+        }
+      });
+      
+      if (extractedOptions.length > 0) {
+        pollData = {
+          id: msgId,
+          pollOptions: extractedOptions.join('\n'),
+          pollType: 'multiple',
+          pollSettings: [],
+          title: reconstructedTitle,
+          text: reconstructedText
+        };
+        
+        activePollMessages.set(messageTs, pollData);
+        console.log('Reconstructed poll data:', pollData);
+      }
+    }
+
+    if (!pollData) {
+      console.error(`Poll data not found for msgId: ${msgId}`);
+      console.log('Available active polls:', Array.from(activePollMessages.keys()));
+      console.log('Available scheduled polls:', scheduledMessages.map(m => m.id));
+      
+      try {
+        await client.chat.postEphemeral({
+          channel: channel || user,
+          user: user,
+          text: 'Poll data not found. Please try refreshing or contact an admin if this persists.'
+        });
+      } catch (e) {
+        console.log('Could not send poll not found message.');
+      }
+      return;
+    }
+
+    console.log('Found poll data:', JSON.stringify(pollData, null, 2));
+
+    const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
+    console.log(`Poll options:`, options);
+
+    if (messageTs && !activePollMessages.has(messageTs)) {
+      activePollMessages.set(messageTs, pollData);
+      console.log(`Stored poll data in activePollMessages for ${messageTs}`);
+    }
+
+    if (!pollVotes[msgId]) {
+      pollVotes[msgId] = {};
+      console.log(`Created new vote tracking for msgId: ${msgId}`);
+    }
+
+    for (let i = 0; i < options.length; i++) {
+      if (!pollVotes[msgId][i]) {
+        pollVotes[msgId][i] = new Set();
+        console.log(`Created vote set for option ${i}`);
+      }
+    }
+
+    if (optionIndex < 0 || optionIndex >= options.length) {
+      console.error(`Invalid option index: ${optionIndex} for poll with ${options.length} options`);
+      try {
+        await client.chat.postEphemeral({
+          channel: channel || user,
+          user: user,
+          text: 'Invalid poll option. Please try again.'
+        });
+      } catch (e) {
+        console.log('Could not send invalid option message.');
+      }
+      return;
+    }
+
+    if (!pollVotes[msgId][optionIndex]) {
+      pollVotes[msgId][optionIndex] = new Set();
+      console.log(`Created missing vote set for option ${optionIndex}`);
+    }
+
+    console.log(`Vote tracking state for ${msgId}:`, Object.keys(pollVotes[msgId]));
+
+    let userVoteChanged = false;
+
+    if (pollData.pollType === 'single') {
+      Object.keys(pollVotes[msgId]).forEach(idx => {
+        if (parseInt(idx) !== optionIndex && pollVotes[msgId][idx].has(user)) {
+          pollVotes[msgId][idx].delete(user);
+          userVoteChanged = true;
+        }
+      });
+      
+      if (pollVotes[msgId][optionIndex].has(user)) {
+        pollVotes[msgId][optionIndex].delete(user);
+        console.log(`Removed vote from option ${optionIndex} (single choice)`);
+        userVoteChanged = true;
+      } else {
+        pollVotes[msgId][optionIndex].add(user);
+        console.log(`Added vote to option ${optionIndex} (single choice)`);
+        userVoteChanged = true;
+      }
+    } else {
+      if (pollVotes[msgId][optionIndex].has(user)) {
+        pollVotes[msgId][optionIndex].delete(user);
+        console.log(`Removed vote from option ${optionIndex} (multiple choice)`);
+        userVoteChanged = true;
+      } else {
+        pollVotes[msgId][optionIndex].add(user);
+        console.log(`Added vote to option ${optionIndex} (multiple choice)`);
+        userVoteChanged = true;
+      }
+    }
+
+    if (userVoteChanged && messageTs && channel) {
+      console.log('About to update poll message with vote data:', JSON.stringify(pollVotes[msgId], null, 2));
+      await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
+    }
+
+    console.log(`Vote processed for user ${user} on poll ${msgId}`);
+    
+  } catch (error) {
+    console.error('Poll vote error:', error);
+    console.error('Error stack:', error.stack);
+    
+    try {
+      await client.chat.postEphemeral({
+        channel: (body.channel && body.channel.id) || body.user.id,
+        user: body.user.id,
+        text: 'There was an error processing your vote. Please try again.'
+      });
+    } catch (e) {
+      console.log('Could not send error message to user.');
+    }
+  }
+});
+
+app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
+  await ack();
+  try {
+    const actionData = JSON.parse(action.value);
+    const msgId = actionData.msgId;
+    const alertChannels = actionData.alertChannels || [];
+    const user = body.user.id;
+    const channel = (body.channel && body.channel.id) || null;
+
+    if (!alertChannels || alertChannels.length === 0) {
+      try {
+        await client.chat.postEphemeral({
+          channel: channel || user,
+          user,
+          text: 'No alert channels configured for this help button.'
+        });
+      } catch (e) {
+        console.log('Could not post ephemeral help warning.');
+      }
+      return;
+    }
+
+    let successCount = 0;
+    const alertPromises = alertChannels.map(async (alertChannel) => {
+      try {
+        await client.chat.postMessage({
+          channel: alertChannel,
+          text: `<@${user}> needs backup in ${channel ? `<#${channel}>` : 'this area'}`,
+          unfurl_links: false,
+          unfurl_media: false
+        });
+        successCount++;
+      } catch (e) {
+        console.error(`Alert failed for channel ${alertChannel}:`, e);
+      }
+    });
+
+    await Promise.all(alertPromises);
+
+    try {
+      await client.chat.postEphemeral({
+        channel: channel || user,
+        user,
+        text: `Backup request sent to ${successCount}/${alertChannels.length} alert channels.${cat()}`
+      });
+    } catch (e) {
+      console.log('Could not post ephemeral confirmation.');
+    }
+
+    console.log(`Backup request from ${user} sent to ${successCount}/${alertChannels.length} alert channels`);
+  } catch (error) {
+    console.error('Help button error:', error);
+  }
+});
+
+app.command('/cat-debug', async ({ ack, body, client }) => {
+  await ack();
+
+  const channelId = body.channel_id;
+  const userId = body.user_id;
+
+  await client.chat.postEphemeral({
+    channel: channelId,
+    user: userId,
+    text: 'Running debug tests... check console for details'
+  });
+
+  try {
+    const authTest = await client.auth.test();
+    const channelInfo = await client.conversations.info({ channel: channelId });
+    const testResult = await client.chat.postMessage({
+      channel: channelId,
+      text: 'Debug test message - if you see this, posting works!'
+    });
+
+    if (testResult.ok) {
+      await client.chat.postEphemeral({
+        channel: channelId,
+        user: userId,
+        text: 'Debug complete - message posting works! Test message will be deleted in 5 seconds.'
+      });
+
+      setTimeout(async () => {
+        try {
+          await client.chat.delete({
+            channel: channelId,
+            ts: testResult.ts
+          });
+        } catch (e) {
+          console.log('Note: Could not delete test message');
+        }
+      }, 5000);
+    }
+  } catch (error) {
+    await client.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      text: 'Debug failed - check console for details'
+    });
+  }
+});
+
+app.command('/cat-form-debug', async ({ ack, body, client }) => {
+  await ack();
+
+  const userId = body.user_id;
+  const userData = formData.get(userId);
+
+  await client.chat.postEphemeral({
+    channel: body.channel_id,
+    user: userId,
+    text: `Form Data Debug:\n\`\`\`${JSON.stringify(userData, null, 2) || 'No data found'}\`\`\`\n\nFormData Size: ${formData.size} users`
+  });
+});
+
+app.error((error) => {
+  console.error('Global error:', error);
+  if (error.message && error.message.includes('poll')) {
+    console.error('Poll-specific error details:', {
+      message: error.message,
+      stack: error.stack && error.stack.slice(0, 500)
+    });
+  }
+});
+
+cron.schedule('0 * * * *', () => {
+  const beforeCount = scheduledMessages.length;
+  scheduledMessages = scheduledMessages.filter(msg => {
+    if (msg.repeat !== 'none') return true;
+
+    const isPast = isDateTimeInPast(msg.date, msg.time);
+    if (isPast) {
+      if (jobs.has(msg.id)) {
+        try {
+          jobs.get(msg.id).destroy();
+        } catch (_) {}
+        jobs.delete(msg.id);
+      }
+    }
+
+    return !isPast;
+  });
+
+  if (scheduledMessages.length !== beforeCount) {
+    saveMessages();
+    console.log(`${cat()} Cleaned up ${beforeCount - scheduledMessages.length} expired messages`);
+  }
+}, {
+  timezone: 'America/New_York'
+});
+
+(async () => {
+  try {
+    const keepAliveServer = require('http').createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('PM Squad Bot Enhanced is running!');
+    });
+
+    const PORT = process.env.PORT || 3000;
+    keepAliveServer.listen(PORT, () => {
+      console.log(`Keep-alive server running on port ${PORT}`);
+    });
+
+    scheduledMessages.forEach(msg => scheduleJob(msg));
+
+    await app.start();
+    
+    console.log('PM Squad Bot "Cat Scratch" Enhanced Version is running!');
+    console.log(`Loaded ${scheduledMessages.length} scheduled messages`);
+    console.log(`Active jobs: ${jobs.size}`);
+    console.log(`Current EST time: ${currentTimeInEST()}`);
+    console.log(`Current EST date: ${todayInEST()}`);
+    console.log(`User data entries: ${Object.keys(userData).length}`);
+
+    if (scheduledMessages.length > 0) {
+      console.log('Scheduled Messages:');
+      scheduledMessages.forEach(msg => {
+        const nextRun = msg.repeat === 'none' ?
+          `${msg.date} at ${msg.time}` :
+          `${msg.repeat} at ${msg.time}`;
+        console.log(`  - ${msg.type}: ${nextRun} -> #${msg.channel}`);
+      });
+    }
+
+    console.log('Available commands:');
+    console.log('  /cat - Main menu');
+    console.log('  /capacity - Direct capacity check');
+    console.log('  /help - Create help button');
+    console.log('  /manage - Message management');
+    console.log('  /cat-debug - Debug testing');
+    console.log('  /cat-form-debug - Form data debugging');
+    console.log('All poll action handlers initialized successfully');
+    console.log('All systems ready!');
+  } catch (error) {
+    console.error('Failed to start app:', error);
+    process.exit(1);
+  }
+})();
+
+process.on('SIGINT', () => {
+  console.log(`${cat()} Shutting down, cleaning up jobs...`);
+  jobs.forEach(job => job.destroy());
+  process.exit(0);
+}); (msg.repeat !== 'none') return true;
         return !isDateTimeInPast(msg.date, msg.time);
       });
       saveMessages();
@@ -162,19 +636,19 @@ function isDateTimeInPast(dateStr, timeStr) {
 }
 
 function getFormValue(values, blockId, actionId, type = 'value') {
-  const block = values?.[blockId]?.[actionId];
+  const block = values && values[blockId] && values[blockId][actionId];
 
-  if (type === 'selected') return block?.selected_option?.value;
+  if (type === 'selected') return block && block.selected_option && block.selected_option.value;
   if (type === 'conversation') {
-    return block?.selected_conversation || block?.initial_conversation || block?.selected_channel || block?.value;
+    return block && (block.selected_conversation || block.initial_conversation || block.selected_channel || block.value);
   }
   if (type === 'conversations') {
-    return block?.selected_conversations || block?.initial_conversations || [];
+    return block && (block.selected_conversations || block.initial_conversations) || [];
   }
-  if (type === 'time') return block?.selected_time;
-  if (type === 'date') return block?.selected_date;
+  if (type === 'time') return block && block.selected_time;
+  if (type === 'date') return block && block.selected_date;
 
-  return block?.value?.trim();
+  return block && block.value && block.value.trim();
 }
 
 function getInitialTextValue(page, data) {
@@ -220,7 +694,7 @@ function generatePreview(data) {
       const options = data.pollOptions.split('\n').filter(o => o.trim());
       previewText += '\n' + options.map((opt, i) => `${i + 1}. ${opt.trim()}`).join('\n');
       
-      if (data.pollSettings?.length > 0) {
+      if (data.pollSettings && data.pollSettings.length > 0) {
         previewText += `\n\nSettings: ${data.pollSettings.join(', ')}`;
       }
       
@@ -334,7 +808,6 @@ function createAppHome(userId) {
     }
   ];
 
-  // Show management section if user has scheduled messages
   if (scheduledMessages.length > 0) {
     blocks.push(
       { type: 'divider' },
@@ -353,7 +826,6 @@ function createAppHome(userId) {
     );
   }
 
-  // Add getting started tip for new users
   if (!user.isExperienced) {
     blocks.push(
       { type: 'divider' },
@@ -590,25 +1062,33 @@ function createModal(page, data = {}) {
         element: {
           type: 'conversations_select',
           action_id: 'channel_select',
-          ...(data.channel && { initial_conversation: data.channel }),
           placeholder: { type: 'plain_text', text: 'Select channel to post message' }
         }
       }
     ];
 
+    if (data.channel) {
+      scheduleBlocks[scheduleBlocks.length - 1].element.initial_conversation = data.channel;
+    }
+
     if (data.type === 'help') {
-      scheduleBlocks.push({
+      const alertBlock = {
         type: 'input',
         block_id: 'alert_channels_block',
         label: { type: 'plain_text', text: 'Alert Channels' },
         element: {
           type: 'multi_conversations_select',
           action_id: 'alert_channels_select',
-          ...(data.alertChannels && data.alertChannels.length > 0 && { initial_conversations: data.alertChannels }),
           placeholder: { type: 'plain_text', text: 'Channels to notify when help is requested' }
         },
         hint: { type: 'plain_text', text: 'Select channels that will be alerted when someone clicks the help button' }
-      });
+      };
+
+      if (data.alertChannels && data.alertChannels.length > 0) {
+        alertBlock.element.initial_conversations = data.alertChannels;
+      }
+
+      scheduleBlocks.push(alertBlock);
     }
 
     scheduleBlocks.push(
@@ -776,12 +1256,6 @@ function createModal(page, data = {}) {
 
   // ENHANCED POLL BLOCKS
   if (page === 'poll') {
-    console.log('Creating poll modal with data:', {
-      pollType: data.pollType,
-      pollOptions: data.pollOptions,
-      enhancedOptions: data.enhancedOptions ? Object.keys(data.enhancedOptions) : 'none'
-    });
-
     try {
       commonBlocks.push(
         { type: 'divider' },
@@ -803,7 +1277,6 @@ function createModal(page, data = {}) {
         }
       );
 
-      // Poll options section
       commonBlocks.push(
         { type: 'divider' },
         { 
@@ -819,19 +1292,16 @@ function createModal(page, data = {}) {
         data.pollOptions.split('\n') :
         ['', ''];
 
-      // Ensure we have at least 2 options
       while (options.length < 2) {
         options.push('');
       }
 
-      // Parse enhanced option data if it exists
       const enhancedOptions = data.enhancedOptions || {};
 
       options.forEach((option, index) => {
         const optionData = enhancedOptions[index] || {};
         const showDetails = optionData.showDetails || false;
 
-        // Option input field
         commonBlocks.push({
           type: 'input',
           block_id: `option_${index}_block`,
@@ -845,7 +1315,6 @@ function createModal(page, data = {}) {
           optional: index >= 2
         });
 
-        // Add details button in separate section
         commonBlocks.push({
           type: 'section',
           text: {
@@ -860,7 +1329,6 @@ function createModal(page, data = {}) {
           }
         });
 
-        // Show detailed fields if toggled on
         if (showDetails) {
           commonBlocks.push({
             type: 'input',
@@ -917,7 +1385,6 @@ function createModal(page, data = {}) {
         }
       });
 
-      // Dynamic option management buttons
       const actionElements = [];
 
       if (options.length < 10) {
@@ -946,8 +1413,6 @@ function createModal(page, data = {}) {
           elements: actionElements
         });
       }
-
-      console.log('Poll form blocks created, enhanced options:', data.enhancedOptions);
 
     } catch (error) {
       console.error('Error creating poll form:', error);
@@ -1046,7 +1511,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
       });
     }
 
-    // Poll status indicators
     let statusElements = [];
     if (pollData.pollType === 'single') {
       statusElements.push({ type: 'mrkdwn', text: '🔘 Single choice' });
@@ -1068,27 +1532,23 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
     blocks.push({ type: 'divider' });
 
     if (options.length > 0) {
-      // Enhanced option blocks with vote buttons and rich content
       options.forEach((option, idx) => {
         const voteCount = votes[idx] ? votes[idx].size : 0;
         const voters = votes[idx] ? Array.from(votes[idx]) : [];
-        const enhancedData = pollData.enhancedOptions?.[idx] || {};
+        const enhancedData = (pollData.enhancedOptions && pollData.enhancedOptions[idx]) || {};
         
-        // Create vote button with different styles based on poll state
         let buttonText = 'Vote';
         
         if (isClosed) {
           buttonText = 'Closed';
         }
         
-        // Build option text with enhanced content
         let optionText = `*${idx + 1}.* ${option}`;
         
         if (enhancedData.description) {
           optionText += `\n_${enhancedData.description}_`;
         }
         
-        // Option section with vote button
         const optionBlock = {
           type: 'section',
           text: {
@@ -1112,7 +1572,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
         
         blocks.push(optionBlock);
 
-        // Add image if provided
         if (enhancedData.imageUrl) {
           blocks.push({
             type: 'image',
@@ -1121,7 +1580,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
           });
         }
 
-        // Add link if provided
         if (enhancedData.linkUrl) {
           const linkText = enhancedData.linkText || 'Learn more';
           blocks.push({
@@ -1133,7 +1591,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
           });
         }
 
-        // Vote display logic
         if (voteCount === 0) {
           blocks.push({
             type: 'context',
@@ -1143,7 +1600,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
             }]
           });
         } else {
-          // Show vote count and voters
           const countText = `📊 ${voteCount} vote${voteCount !== 1 ? 's' : ''}`;
           const voterText = voters.length > 0 ? voters.map(userId => `<@${userId}>`).join(', ') : '';
           
@@ -1166,7 +1622,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
           }
         }
 
-        // Add spacing between options if there are enhanced elements
         if (enhancedData.description || enhancedData.imageUrl || enhancedData.linkUrl) {
           blocks.push({ type: 'divider' });
         }
@@ -1175,7 +1630,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
 
     blocks.push({ type: 'divider' });
 
-    // Enhanced footer with comprehensive poll info
     const totalVotes = Object.values(votes).reduce((sum, voteSet) => sum + voteSet.size, 0);
     const totalVoters = new Set(Object.values(votes).flatMap(voteSet => Array.from(voteSet))).size;
     const voteTypeText = pollData.pollType === 'single' ? 'Single choice' : 'Multiple choice';
@@ -1225,7 +1679,7 @@ async function sendMessage(msg) {
       const channelInfo = await app.client.conversations.info({ channel: msg.channel });
       console.log(`Channel accessible: #${channelInfo.channel.name}`);
     } catch (channelError) {
-      console.error(`Channel access failed for ${msg.channel}:`, channelError?.data || channelError?.message);
+      console.error(`Channel access failed for ${msg.channel}:`, (channelError && channelError.data) || (channelError && channelError.message));
       return false;
     }
 
@@ -1246,7 +1700,7 @@ async function sendMessage(msg) {
               name: reaction
             });
           } catch (e) {
-            console.error(`Reaction failed for :${reaction}:`, e?.data?.error || e?.message);
+            console.error(`Reaction failed for :${reaction}:`, (e && e.data && e.data.error) || (e && e.message));
           }
         }
       }
@@ -1256,7 +1710,6 @@ async function sendMessage(msg) {
       console.log('Poll options:', options);
       console.log('Poll ID for buttons:', msg.id);
 
-      // Initialize vote tracking
       if (!pollVotes[msg.id]) {
         pollVotes[msg.id] = {};
         for (let i = 0; i < options.length; i++) {
@@ -1287,7 +1740,6 @@ async function sendMessage(msg) {
 
       blocks.push({ type: 'divider' });
 
-      // Enhanced option blocks
       options.forEach((option, idx) => {
         const actionId = `poll_vote_${msg.id}_${idx}`;
         console.log(`Creating button ${idx}: ${actionId}`);
@@ -1396,7 +1848,9 @@ async function sendMessage(msg) {
 
 function scheduleJob(msg) {
   if (jobs.has(msg.id)) {
-    try { jobs.get(msg.id).destroy(); } catch (_) {}
+    try { 
+      jobs.get(msg.id).destroy(); 
+    } catch (_) {}
     jobs.delete(msg.id);
   }
 
@@ -1428,7 +1882,9 @@ function scheduleJob(msg) {
     if (msg.repeat === 'none') {
       scheduledMessages = scheduledMessages.filter(m => m.id !== msg.id);
       saveMessages();
-      try { job.destroy(); } catch (_) {}
+      try { 
+        job.destroy(); 
+      } catch (_) {}
       jobs.delete(msg.id);
     }
   }, { timezone: 'America/New_York' });
@@ -1437,10 +1893,9 @@ function scheduleJob(msg) {
 }
 
 // ================================
-// SLASH COMMANDS - ENHANCED
+// SLASH COMMANDS
 // ================================
 
-// Main menu command
 app.command('/cat', async ({ ack, body, client }) => {
   await ack();
   updateUserActivity(body.user_id);
@@ -1454,7 +1909,6 @@ app.command('/cat', async ({ ack, body, client }) => {
   }
 });
 
-// Direct message type commands
 app.command('/capacity', async ({ ack, body, client }) => {
   await ack();
   updateUserActivity(body.user_id);
@@ -1529,7 +1983,6 @@ app.event('app_home_opened', async ({ event, client }) => {
   }
 });
 
-// Home action handlers
 ['home_capacity', 'home_help', 'home_poll', 'home_custom', 'home_manage'].forEach(action => {
   app.action(action, async ({ ack, body, client }) => {
     await ack();
@@ -1602,51 +2055,48 @@ app.event('app_home_opened', async ({ event, client }) => {
   });
 });
 
-// FIXED: Enhanced preview navigation handler
 app.action('nav_preview', async ({ ack, body, client }) => {
   await ack();
   try {
     const userId = body.user.id;
     let data = formData.get(userId) || {};
     
-    if (body.view?.state?.values) {
+    if (body.view && body.view.state && body.view.state.values) {
       const values = body.view.state.values;
       
-      // Extract all form data including poll-specific fields
       data = {
-        ...data,
-        ...(data.type !== 'capacity' && data.type !== 'help' && {
-          title: getFormValue(values, 'title_block', 'title_input') || data.title
-        }),
-        text: getFormValue(values, 'text_block', 'text_input') || data.text,
+        ...data
       };
+
+      if (data.type !== 'capacity' && data.type !== 'help') {
+        data.title = getFormValue(values, 'title_block', 'title_input') || data.title;
+      }
+
+      data.text = getFormValue(values, 'text_block', 'text_input') || data.text;
 
       if (data.text && data.type) {
         data.userModifiedText = hasUserModifiedTemplate(data.type, data.text);
       }
 
-      // Poll-specific data extraction
       if (data.type === 'poll') {
-        const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
-        data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
+        const pollTypeBlock = values && values.poll_type_section && values.poll_type_section.poll_type_radio;
+        data.pollType = (pollTypeBlock && pollTypeBlock.selected_option && pollTypeBlock.selected_option.value) || data.pollType || 'multiple';
 
-        // Extract poll options and enhanced data
         let extractedOptions = [];
         let enhancedOptions = data.enhancedOptions || {};
         let index = 0;
         
         while (values[`option_${index}_block`]) {
-          const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
+          const optionValue = values[`option_${index}_block`][`option_${index}_input`] && values[`option_${index}_block`][`option_${index}_input`].value && values[`option_${index}_block`][`option_${index}_input`].value.trim();
           if (optionValue) extractedOptions.push(optionValue);
           
-          // Preserve enhanced option data
           const existingData = enhancedOptions[index] || {};
           enhancedOptions[index] = {
             showDetails: existingData.showDetails || false,
-            description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingData.description || '',
-            imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingData.imageUrl || '',
-            linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingData.linkUrl || '',
-            linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingData.linkText || ''
+            description: (values[`option_${index}_description_block`] && values[`option_${index}_description_block`][`option_${index}_description_input`] && values[`option_${index}_description_block`][`option_${index}_description_input`].value) || existingData.description || '',
+            imageUrl: (values[`option_${index}_image_block`] && values[`option_${index}_image_block`][`option_${index}_image_input`] && values[`option_${index}_image_block`][`option_${index}_image_input`].value) || existingData.imageUrl || '',
+            linkUrl: (values[`option_${index}_link_block`] && values[`option_${index}_link_block`][`option_${index}_link_input`] && values[`option_${index}_link_block`][`option_${index}_link_input`].value) || existingData.linkUrl || '',
+            linkText: (values[`option_${index}_link_text_block`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`].value) || existingData.linkText || ''
           };
           index++;
         }
@@ -1680,20 +2130,22 @@ app.action('nav_schedule', async ({ ack, body, client }) => {
     const userId = body.user.id;
     let data = formData.get(userId) || {};
 
-    if (body.view?.state?.values) {
+    if (body.view && body.view.state && body.view.state.values) {
       const values = body.view.state.values;
 
       data = {
         ...data,
-        ...(data.type !== 'capacity' && data.type !== 'help' && {
-          title: getFormValue(values, 'title_block', 'title_input') || data.title
-        }),
-        text: getFormValue(values, 'text_block', 'text_input') || data.text,
         channel: getFormValue(values, 'channel_block', 'channel_select', 'conversation') || data.channel,
         date: getFormValue(values, 'date_block', 'date_picker', 'date') || data.date,
         time: getFormValue(values, 'time_block', 'time_picker', 'time') || data.time,
         repeat: getFormValue(values, 'repeat_block', 'repeat_select', 'selected') || data.repeat || 'none'
       };
+
+      if (data.type !== 'capacity' && data.type !== 'help') {
+        data.title = getFormValue(values, 'title_block', 'title_input') || data.title;
+      }
+
+      data.text = getFormValue(values, 'text_block', 'text_input') || data.text;
 
       if (data.type === 'help') {
         const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
@@ -1716,7 +2168,6 @@ app.action('nav_schedule', async ({ ack, body, client }) => {
   }
 });
 
-// Form type navigation handlers
 ['nav_capacity', 'nav_poll', 'nav_help', 'nav_custom'].forEach(action => {
   app.action(action, async ({ ack, body, client }) => {
     await ack();
@@ -1764,7 +2215,6 @@ app.action('nav_schedule', async ({ ack, body, client }) => {
   });
 });
 
-// Template reset handlers
 ['reset_template_capacity', 'reset_template_help'].forEach(action => {
   app.action(action, async ({ ack, body, client }) => {
     await ack();
@@ -1791,7 +2241,6 @@ app.action('nav_schedule', async ({ ack, body, client }) => {
   });
 });
 
-// Schedule page handlers
 app.action('timing_now', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1826,7 +2275,6 @@ app.action('timing_schedule', async ({ ack, body, client }) => {
   }
 });
 
-// Form input handlers
 app.action('channel_select', async ({ ack, body, client }) => {
   await ack();
   const userId = body.user.id;
@@ -1921,7 +2369,6 @@ app.action('alert_channels_select', async ({ ack, body, client }) => {
 // ENHANCED POLL FORM HANDLERS - FIXED
 // ================================
 
-// 1. Poll type selection handler
 app.action('poll_type_radio', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1942,7 +2389,6 @@ app.action('poll_type_radio', async ({ ack, body, client }) => {
   }
 });
 
-// 2. Add poll option handler - FIXED
 app.action('add_poll_option', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1952,43 +2398,40 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
 
     console.log('Add option triggered - preserving form state');
 
-    // Preserve all current form field values first
     data = {
-      ...data,
-      ...(data.type !== 'capacity' && data.type !== 'help' && {
-        title: getFormValue(values, 'title_block', 'title_input') || data.title
-      }),
-      text: getFormValue(values, 'text_block', 'text_input') || data.text,
+      ...data
     };
 
-    // Update poll type if it changed
-    const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
-    if (pollTypeBlock) {
-      data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
+    if (data.type !== 'capacity' && data.type !== 'help') {
+      data.title = getFormValue(values, 'title_block', 'title_input') || data.title;
     }
 
-    // Extract all current options and enhanced data
+    data.text = getFormValue(values, 'text_block', 'text_input') || data.text;
+
+    const pollTypeBlock = values && values.poll_type_section && values.poll_type_section.poll_type_radio;
+    if (pollTypeBlock) {
+      data.pollType = (pollTypeBlock && pollTypeBlock.selected_option && pollTypeBlock.selected_option.value) || data.pollType || 'multiple';
+    }
+
     let options = [];
     let enhancedOptions = data.enhancedOptions || {};
     let index = 0;
     
     while (values[`option_${index}_block`]) {
-      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
+      const optionValue = values[`option_${index}_block`][`option_${index}_input`] && values[`option_${index}_block`][`option_${index}_input`].value && values[`option_${index}_block`][`option_${index}_input`].value.trim();
       options.push(optionValue || '');
       
-      // Preserve enhanced option data
       const existingEnhanced = enhancedOptions[index] || {};
       enhancedOptions[index] = {
         showDetails: existingEnhanced.showDetails || false,
-        description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingEnhanced.description || '',
-        imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingEnhanced.imageUrl || '',
-        linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingEnhanced.linkUrl || '',
-        linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingEnhanced.linkText || ''
+        description: (values[`option_${index}_description_block`] && values[`option_${index}_description_block`][`option_${index}_description_input`] && values[`option_${index}_description_block`][`option_${index}_description_input`].value) || existingEnhanced.description || '',
+        imageUrl: (values[`option_${index}_image_block`] && values[`option_${index}_image_block`][`option_${index}_image_input`] && values[`option_${index}_image_block`][`option_${index}_image_input`].value) || existingEnhanced.imageUrl || '',
+        linkUrl: (values[`option_${index}_link_block`] && values[`option_${index}_link_block`][`option_${index}_link_input`] && values[`option_${index}_link_block`][`option_${index}_link_input`].value) || existingEnhanced.linkUrl || '',
+        linkText: (values[`option_${index}_link_text_block`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`].value) || existingEnhanced.linkText || ''
       };
       index++;
     }
 
-    // Add one more empty option (max 10 total)
     if (options.length < 10) {
       options.push('');
       enhancedOptions[options.length - 1] = { 
@@ -2016,7 +2459,6 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
   }
 });
 
-// 3. Remove poll option handler - FIXED
 app.action('remove_poll_option', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -2026,43 +2468,40 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
 
     console.log('Remove option triggered - preserving form state');
 
-    // Preserve all current form field values first
     data = {
-      ...data,
-      ...(data.type !== 'capacity' && data.type !== 'help' && {
-        title: getFormValue(values, 'title_block', 'title_input') || data.title
-      }),
-      text: getFormValue(values, 'text_block', 'text_input') || data.text,
+      ...data
     };
 
-    // Update poll type
-    const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
-    if (pollTypeBlock) {
-      data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
+    if (data.type !== 'capacity' && data.type !== 'help') {
+      data.title = getFormValue(values, 'title_block', 'title_input') || data.title;
     }
 
-    // Extract all current options and enhanced data
+    data.text = getFormValue(values, 'text_block', 'text_input') || data.text;
+
+    const pollTypeBlock = values && values.poll_type_section && values.poll_type_section.poll_type_radio;
+    if (pollTypeBlock) {
+      data.pollType = (pollTypeBlock && pollTypeBlock.selected_option && pollTypeBlock.selected_option.value) || data.pollType || 'multiple';
+    }
+
     let options = [];
     let enhancedOptions = data.enhancedOptions || {};
     let index = 0;
     
     while (values[`option_${index}_block`]) {
-      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
+      const optionValue = values[`option_${index}_block`][`option_${index}_input`] && values[`option_${index}_block`][`option_${index}_input`].value && values[`option_${index}_block`][`option_${index}_input`].value.trim();
       options.push(optionValue || '');
       
-      // Preserve enhanced option data
       const existingEnhanced = enhancedOptions[index] || {};
       enhancedOptions[index] = {
         showDetails: existingEnhanced.showDetails || false,
-        description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingEnhanced.description || '',
-        imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingEnhanced.imageUrl || '',
-        linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingEnhanced.linkUrl || '',
-        linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingEnhanced.linkText || ''
+        description: (values[`option_${index}_description_block`] && values[`option_${index}_description_block`][`option_${index}_description_input`] && values[`option_${index}_description_block`][`option_${index}_description_input`].value) || existingEnhanced.description || '',
+        imageUrl: (values[`option_${index}_image_block`] && values[`option_${index}_image_block`][`option_${index}_image_input`] && values[`option_${index}_image_block`][`option_${index}_image_input`].value) || existingEnhanced.imageUrl || '',
+        linkUrl: (values[`option_${index}_link_block`] && values[`option_${index}_link_block`][`option_${index}_link_input`] && values[`option_${index}_link_block`][`option_${index}_link_input`].value) || existingEnhanced.linkUrl || '',
+        linkText: (values[`option_${index}_link_text_block`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`].value) || existingEnhanced.linkText || ''
       };
       index++;
     }
 
-    // Remove the last option if we have more than 2 (minimum required)
     if (options.length > 2) {
       const removedIndex = options.length - 1;
       options.pop();
@@ -2084,7 +2523,6 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
   }
 });
 
-// 4. Toggle option details handler - FIXED
 app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
   await ack();
   try {
@@ -2095,40 +2533,37 @@ app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
     
     console.log(`Toggling details for option ${optionIndex}`);
     
-    // Preserve all current form data INCLUDING enhanced fields
     if (values) {
-      // Main form fields
       data = {
-        ...data,
-        ...(data.type !== 'capacity' && data.type !== 'help' && {
-          title: getFormValue(values, 'title_block', 'title_input') || data.title
-        }),
-        text: getFormValue(values, 'text_block', 'text_input') || data.text,
+        ...data
       };
 
-      // Poll type
-      const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
-      if (pollTypeBlock) {
-        data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
+      if (data.type !== 'capacity' && data.type !== 'help') {
+        data.title = getFormValue(values, 'title_block', 'title_input') || data.title;
       }
 
-      // Extract and preserve ALL option data
+      data.text = getFormValue(values, 'text_block', 'text_input') || data.text;
+
+      const pollTypeBlock = values && values.poll_type_section && values.poll_type_section.poll_type_radio;
+      if (pollTypeBlock) {
+        data.pollType = (pollTypeBlock && pollTypeBlock.selected_option && pollTypeBlock.selected_option.value) || data.pollType || 'multiple';
+      }
+
       let options = [];
       let enhancedOptions = data.enhancedOptions || {};
       let index = 0;
       
       while (values[`option_${index}_block`]) {
-        const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
+        const optionValue = values[`option_${index}_block`][`option_${index}_input`] && values[`option_${index}_block`][`option_${index}_input`].value && values[`option_${index}_block`][`option_${index}_input`].value.trim();
         options.push(optionValue || '');
         
-        // Preserve existing enhanced data and update with current form values
         const existingEnhanced = enhancedOptions[index] || {};
         enhancedOptions[index] = {
           showDetails: existingEnhanced.showDetails || false,
-          description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingEnhanced.description || '',
-          imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingEnhanced.imageUrl || '',
-          linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingEnhanced.linkUrl || '',
-          linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingEnhanced.linkText || ''
+          description: (values[`option_${index}_description_block`] && values[`option_${index}_description_block`][`option_${index}_description_input`] && values[`option_${index}_description_block`][`option_${index}_description_input`].value) || existingEnhanced.description || '',
+          imageUrl: (values[`option_${index}_image_block`] && values[`option_${index}_image_block`][`option_${index}_image_input`] && values[`option_${index}_image_block`][`option_${index}_image_input`].value) || existingEnhanced.imageUrl || '',
+          linkUrl: (values[`option_${index}_link_block`] && values[`option_${index}_link_block`][`option_${index}_link_input`] && values[`option_${index}_link_block`][`option_${index}_link_input`].value) || existingEnhanced.linkUrl || '',
+          linkText: (values[`option_${index}_link_text_block`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`].value) || existingEnhanced.linkText || ''
         };
         index++;
       }
@@ -2137,12 +2572,10 @@ app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
       data.enhancedOptions = enhancedOptions;
     }
     
-    // Initialize enhancedOptions if needed
     if (!data.enhancedOptions) {
       data.enhancedOptions = {};
     }
     
-    // Initialize this option if needed
     if (!data.enhancedOptions[optionIndex]) {
       data.enhancedOptions[optionIndex] = { 
         showDetails: false,
@@ -2153,7 +2586,6 @@ app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
       };
     }
     
-    // Toggle the showDetails flag
     data.enhancedOptions[optionIndex].showDetails = !data.enhancedOptions[optionIndex].showDetails;
     
     console.log(`Option ${optionIndex} details toggled to: ${data.enhancedOptions[optionIndex].showDetails}`);
@@ -2170,14 +2602,11 @@ app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
   }
 });
 
-// 5. Individual input field handlers for enhanced options
 for (let i = 0; i < 10; i++) {
-  // Basic option input
   app.action(`option_${i}_input`, async ({ ack }) => {
     await ack();
   });
   
-  // Enhanced option inputs
   app.action(`option_${i}_description_input`, async ({ ack }) => {
     await ack();
   });
@@ -2195,7 +2624,7 @@ for (let i = 0; i < 10; i++) {
   });
 }
 
-// Enhanced Poll Management Actions
+// Poll Management Actions
 app.action('poll_menu', async ({ ack, body, client }) => {
   await ack();
   
@@ -2203,10 +2632,9 @@ app.action('poll_menu', async ({ ack, body, client }) => {
     const selectedOption = body.actions[0].selected_option;
     const actionData = JSON.parse(selectedOption.value);
     const user = body.user.id;
-    const channel = body.channel?.id;
-    const messageTs = body.message?.ts;
+    const channel = body.channel && body.channel.id;
+    const messageTs = body.message && body.message.ts;
 
-    // Check if user is authorized for this action
     if (actionData.createdBy !== user) {
       await client.chat.postEphemeral({
         channel: channel || user,
@@ -2242,7 +2670,6 @@ app.action('poll_menu', async ({ ack, body, client }) => {
   }
 });
 
-// Poll Management Functions
 async function togglePollClosed(client, channel, messageTs, pollData, userId) {
   try {
     pollData.isClosed = !pollData.isClosed;
@@ -2275,7 +2702,7 @@ async function showVotesSummary(client, triggerId, messageTs, pollData) {
       { type: 'divider' }
     ];
 
-    const totalVotes = Object.values(votes).reduce((sum, voteSet) => sum + (voteSet?.size || 0), 0);
+    const totalVotes = Object.values(votes).reduce((sum, voteSet) => sum + ((voteSet && voteSet.size) || 0), 0);
     const totalVoters = new Set(Object.values(votes).flatMap(voteSet => Array.from(voteSet || []))).size;
     
     blocks.push({
@@ -2289,7 +2716,7 @@ async function showVotesSummary(client, triggerId, messageTs, pollData) {
     blocks.push({ type: 'divider' });
 
     options.forEach((option, idx) => {
-      const voteCount = votes[idx]?.size || 0;
+      const voteCount = (votes[idx] && votes[idx].size) || 0;
       const voters = votes[idx] ? Array.from(votes[idx]) : [];
       const percentage = totalVotes > 0 ? Math.round((voteCount / totalVotes) * 100) : 0;
       
@@ -2353,7 +2780,6 @@ async function confirmDeletePoll(client, triggerId, messageTs, pollData, userId)
   }
 }
 
-// Handle poll deletion confirmation
 app.view('confirm_delete_poll', async ({ ack, body, view, client }) => {
   await ack();
   
@@ -2361,10 +2787,7 @@ app.view('confirm_delete_poll', async ({ ack, body, view, client }) => {
     const metadata = JSON.parse(view.private_metadata);
     const { messageTs, pollId, userId } = metadata;
     
-    // Remove from active polls
     activePollMessages.delete(messageTs);
-    
-    // Remove vote data
     delete pollVotes[pollId];
     
     await client.chat.postEphemeral({
@@ -2377,12 +2800,11 @@ app.view('confirm_delete_poll', async ({ ack, body, view, client }) => {
   }
 });
 
-// Handle when someone tries to vote on a closed poll
 app.action('poll_closed', async ({ ack, body, client }) => {
   await ack();
   
   await client.chat.postEphemeral({
-    channel: body.channel?.id || body.user.id,
+    channel: (body.channel && body.channel.id) || body.user.id,
     user: body.user.id,
     text: 'This poll has been closed and is no longer accepting votes.'
   });
@@ -2409,7 +2831,7 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
 
       if (data.type === 'help') {
         const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
-        if (!extractedAlertChannels?.length && (!data.alertChannels || data.alertChannels.length === 0)) {
+        if (!(extractedAlertChannels && extractedAlertChannels.length) && (!(data.alertChannels) || data.alertChannels.length === 0)) {
           errors['alert_channels_block'] = 'Please select at least one alert channel for help notifications';
         }
       }
@@ -2453,494 +2875,4 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
         data.alertChannels = extractedAlertChannels || data.alertChannels || [];
       }
 
-      if (!data.id) {
-        data.id = generateId();
-      }
-
-      const finalScheduleType = data.scheduleType || 'schedule';
-
-      if (finalScheduleType === 'now') {
-        const success = await sendMessage(data);
-        const resultMessage = success ?
-          `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message posted to <#${data.channel}>!${cat()}` :
-          `Failed to post message. Please check that I'm invited to <#${data.channel}>.${cat()}`;
-
-        try {
-          await client.chat.postEphemeral({
-            channel: body.user.id,
-            user: userId,
-            text: successMessage
-          });
-        } catch (e) {
-          console.log('Could not send ephemeral scheduling confirmation.');
-        }
-      }
-
-      // Update user activity
-      updateUserActivity(userId);
-      formData.delete(userId);
-    } catch (error) {
-      console.error('Error during modal processing:', error);
-      await ack({
-        response_action: 'errors',
-        errors: { 'channel_block': 'An error occurred processing your request. Please try again.' }
-      });
-    }
-  } else {
-    await ack();
-  }
-});
-
-// Delete scheduled message
-app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-  try {
-    const msgId = action.value;
-    scheduledMessages = scheduledMessages.filter(msg => msg.id !== msgId);
-
-    if (jobs.has(msgId)) {
-      try {
-        jobs.get(msgId).destroy();
-      } catch (_) {}
-      jobs.delete(msgId);
-    }
-
-    saveMessages();
-    await client.views.update({
-      view_id: body.view.id,
-      view: createModal('scheduled')
-    });
-  } catch (error) {
-    console.error('Delete message error:', error);
-  }
-});
-
-// ENHANCED POLL VOTING HANDLER
-app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-  
-  try {
-    console.log('Raw action_id received:', action.action_id);
-    console.log('Action value:', action.value);
-    
-    const actionParts = action.action_id.split('_');
-    console.log('Action parts:', actionParts);
-    
-    if (actionParts.length < 4) {
-      throw new Error(`Invalid action_id format: ${action.action_id}. Expected: poll_vote_msgId_optionIndex`);
-    }
-    
-    const msgId = actionParts.slice(2, -1).join('_');
-    const optionId = actionParts[actionParts.length - 1];
-    const optionIndex = parseInt(optionId);
-    
-    const user = body.user.id;
-    const channel = body.channel?.id;
-    const messageTs = body.message?.ts;
-
-    console.log(`Poll vote parsed: msgId=${msgId}, optionId=${optionId}, optionIndex=${optionIndex}, user=${user}, messageTs=${messageTs}`);
-
-    if (isNaN(optionIndex)) {
-      throw new Error(`Invalid option index: ${optionId} is not a number`);
-    }
-
-    // Find poll data
-    let pollData = scheduledMessages.find(m => m.id === msgId);
-    if (!pollData && messageTs) {
-      pollData = activePollMessages.get(messageTs);
-    }
-    
-    // If still not found, try to reconstruct from message
-    if (!pollData && body.message?.blocks) {
-      console.log('Poll data not found in storage, attempting to reconstruct from message');
-      
-      let reconstructedTitle = 'Poll';
-      let reconstructedText = '';
-      const extractedOptions = [];
-      
-      body.message.blocks.forEach(block => {
-        if (block.type === 'section' && block.text?.text && !reconstructedTitle.includes('*')) {
-          const titleMatch = block.text.text.match(/\*(.+?)\*/);
-          if (titleMatch) {
-            reconstructedTitle = titleMatch[1].replace(/₍\^. \.\^₎/, '').trim();
-          }
-        }
-        
-        if (block.type === 'section' && block.text?.text && !block.text.text.includes('*') && !block.accessory) {
-          reconstructedText = block.text.text;
-        }
-        
-        if (block.type === 'section' && block.accessory?.type === 'button') {
-          const optionText = block.text.text.replace(/\*(.+?)\*/, '$1').trim();
-          if (optionText && !extractedOptions.includes(optionText)) {
-            extractedOptions.push(optionText);
-          }
-        }
-      });
-      
-      if (extractedOptions.length > 0) {
-        pollData = {
-          id: msgId,
-          pollOptions: extractedOptions.join('\n'),
-          pollType: 'multiple',
-          pollSettings: [],
-          title: reconstructedTitle,
-          text: reconstructedText
-        };
-        
-        activePollMessages.set(messageTs, pollData);
-        console.log('Reconstructed poll data:', pollData);
-      }
-    }
-
-    if (!pollData) {
-      console.error(`Poll data not found for msgId: ${msgId}`);
-      console.log('Available active polls:', Array.from(activePollMessages.keys()));
-      console.log('Available scheduled polls:', scheduledMessages.map(m => m.id));
-      
-      try {
-        await client.chat.postEphemeral({
-          channel: channel || user,
-          user: user,
-          text: 'Poll data not found. Please try refreshing or contact an admin if this persists.'
-        });
-      } catch (e) {
-        console.log('Could not send poll not found message.');
-      }
-      return;
-    }
-
-    console.log('Found poll data:', JSON.stringify(pollData, null, 2));
-
-    const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
-    console.log(`Poll options:`, options);
-
-    if (messageTs && !activePollMessages.has(messageTs)) {
-      activePollMessages.set(messageTs, pollData);
-      console.log(`Stored poll data in activePollMessages for ${messageTs}`);
-    }
-
-    if (!pollVotes[msgId]) {
-      pollVotes[msgId] = {};
-      console.log(`Created new vote tracking for msgId: ${msgId}`);
-    }
-
-    for (let i = 0; i < options.length; i++) {
-      if (!pollVotes[msgId][i]) {
-        pollVotes[msgId][i] = new Set();
-        console.log(`Created vote set for option ${i}`);
-      }
-    }
-
-    if (optionIndex < 0 || optionIndex >= options.length) {
-      console.error(`Invalid option index: ${optionIndex} for poll with ${options.length} options`);
-      try {
-        await client.chat.postEphemeral({
-          channel: channel || user,
-          user: user,
-          text: 'Invalid poll option. Please try again.'
-        });
-      } catch (e) {
-        console.log('Could not send invalid option message.');
-      }
-      return;
-    }
-
-    if (!pollVotes[msgId][optionIndex]) {
-      pollVotes[msgId][optionIndex] = new Set();
-      console.log(`Created missing vote set for option ${optionIndex}`);
-    }
-
-    console.log(`Vote tracking state for ${msgId}:`, Object.keys(pollVotes[msgId]));
-
-    let userVoteChanged = false;
-
-    // Handle voting logic based on poll type
-    if (pollData.pollType === 'single') {
-      // Single choice: remove from all other options first
-      Object.keys(pollVotes[msgId]).forEach(idx => {
-        if (parseInt(idx) !== optionIndex && pollVotes[msgId][idx].has(user)) {
-          pollVotes[msgId][idx].delete(user);
-          userVoteChanged = true;
-        }
-      });
-      
-      // Toggle vote for this option
-      if (pollVotes[msgId][optionIndex].has(user)) {
-        pollVotes[msgId][optionIndex].delete(user);
-        console.log(`Removed vote from option ${optionIndex} (single choice)`);
-        userVoteChanged = true;
-      } else {
-        pollVotes[msgId][optionIndex].add(user);
-        console.log(`Added vote to option ${optionIndex} (single choice)`);
-        userVoteChanged = true;
-      }
-    } else {
-      // Multiple choice: toggle vote for this option only
-      if (pollVotes[msgId][optionIndex].has(user)) {
-        pollVotes[msgId][optionIndex].delete(user);
-        console.log(`Removed vote from option ${optionIndex} (multiple choice)`);
-        userVoteChanged = true;
-      } else {
-        pollVotes[msgId][optionIndex].add(user);
-        console.log(`Added vote to option ${optionIndex} (multiple choice)`);
-        userVoteChanged = true;
-      }
-    }
-
-    // Update the poll message with new vote counts
-    if (userVoteChanged && messageTs && channel) {
-      console.log('About to update poll message with vote data:', JSON.stringify(pollVotes[msgId], null, 2));
-      await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
-    }
-
-    console.log(`Vote processed for user ${user} on poll ${msgId}`);
-    
-  } catch (error) {
-    console.error('Poll vote error:', error);
-    console.error('Error stack:', error.stack);
-    
-    try {
-      await client.chat.postEphemeral({
-        channel: body.channel?.id || body.user.id,
-        user: body.user.id,
-        text: 'There was an error processing your vote. Please try again.'
-      });
-    } catch (e) {
-      console.log('Could not send error message to user.');
-    }
-  }
-});
-
-// Help button handler
-app.action(/^help_click_.+/, async ({ ack, body, client, action }) => {
-  await ack();
-  try {
-    const actionData = JSON.parse(action.value);
-    const msgId = actionData.msgId;
-    const alertChannels = actionData.alertChannels || [];
-    const user = body.user.id;
-    const channel = body.channel?.id || null;
-
-    if (!alertChannels || alertChannels.length === 0) {
-      try {
-        await client.chat.postEphemeral({
-          channel: channel || user,
-          user,
-          text: 'No alert channels configured for this help button.'
-        });
-      } catch (e) {
-        console.log('Could not post ephemeral help warning.');
-      }
-      return;
-    }
-
-    let successCount = 0;
-    const alertPromises = alertChannels.map(async (alertChannel) => {
-      try {
-        await client.chat.postMessage({
-          channel: alertChannel,
-          text: `<@${user}> needs backup in ${channel ? `<#${channel}>` : 'this area'}`,
-          unfurl_links: false,
-          unfurl_media: false
-        });
-        successCount++;
-      } catch (e) {
-        console.error(`Alert failed for channel ${alertChannel}:`, e);
-      }
-    });
-
-    await Promise.all(alertPromises);
-
-    try {
-      await client.chat.postEphemeral({
-        channel: channel || user,
-        user,
-        text: `Backup request sent to ${successCount}/${alertChannels.length} alert channels.${cat()}`
-      });
-    } catch (e) {
-      console.log('Could not post ephemeral confirmation.');
-    }
-
-    console.log(`Backup request from ${user} sent to ${successCount}/${alertChannels.length} alert channels`);
-  } catch (error) {
-    console.error('Help button error:', error);
-  }
-});
-
-// Debug commands
-app.command('/cat-debug', async ({ ack, body, client }) => {
-  await ack();
-
-  const channelId = body.channel_id;
-  const userId = body.user_id;
-
-  await client.chat.postEphemeral({
-    channel: channelId,
-    user: userId,
-    text: 'Running debug tests... check console for details'
-  });
-
-  try {
-    const authTest = await client.auth.test();
-    const channelInfo = await client.conversations.info({ channel: channelId });
-    const testResult = await client.chat.postMessage({
-      channel: channelId,
-      text: 'Debug test message - if you see this, posting works!'
-    });
-
-    if (testResult.ok) {
-      await client.chat.postEphemeral({
-        channel: channelId,
-        user: userId,
-        text: 'Debug complete - message posting works! Test message will be deleted in 5 seconds.'
-      });
-
-      setTimeout(async () => {
-        try {
-          await client.chat.delete({
-            channel: channelId,
-            ts: testResult.ts
-          });
-        } catch (e) {
-          console.log('Note: Could not delete test message');
-        }
-      }, 5000);
-    }
-  } catch (error) {
-    await client.chat.postEphemeral({
-      channel: channelId,
-      user: userId,
-      text: 'Debug failed - check console for details'
-    });
-  }
-});
-
-app.command('/cat-form-debug', async ({ ack, body, client }) => {
-  await ack();
-
-  const userId = body.user_id;
-  const userData = formData.get(userId);
-
-  await client.chat.postEphemeral({
-    channel: body.channel_id,
-    user: userId,
-    text: `Form Data Debug:\n\`\`\`${JSON.stringify(userData, null, 2) || 'No data found'}\`\`\`\n\nFormData Size: ${formData.size} users`
-  });
-});
-
-// Enhanced error handling with poll-specific logging
-app.error((error) => {
-  console.error('Global error:', error);
-  if (error.message && error.message.includes('poll')) {
-    console.error('Poll-specific error details:', {
-      message: error.message,
-      stack: error.stack?.slice(0, 500)
-    });
-  }
-});
-
-// Cleanup expired messages
-cron.schedule('0 * * * *', () => {
-  const beforeCount = scheduledMessages.length;
-  scheduledMessages = scheduledMessages.filter(msg => {
-    if (msg.repeat !== 'none') return true;
-
-    const isPast = isDateTimeInPast(msg.date, msg.time);
-    if (isPast) {
-      if (jobs.has(msg.id)) {
-        try {
-          jobs.get(msg.id).destroy();
-        } catch (_) {}
-        jobs.delete(msg.id);
-      }
-    }
-
-    return !isPast;
-  });
-
-  if (scheduledMessages.length !== beforeCount) {
-    saveMessages();
-    console.log(`${cat()} Cleaned up ${beforeCount - scheduledMessages.length} expired messages`);
-  }
-}, {
-  timezone: 'America/New_York'
-});
-
-// Startup
-(async () => {
-  try {
-    const keepAliveServer = require('http').createServer((req, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('PM Squad Bot Enhanced is running!');
-    });
-
-    const PORT = process.env.PORT || 3000;
-    keepAliveServer.listen(PORT, () => {
-      console.log(`Keep-alive server running on port ${PORT}`);
-    });
-
-    // Reschedule existing jobs
-    scheduledMessages.forEach(msg => scheduleJob(msg));
-
-    await app.start();
-    
-    console.log('PM Squad Bot "Cat Scratch" Enhanced Version is running!');
-    console.log(`Loaded ${scheduledMessages.length} scheduled messages`);
-    console.log(`Active jobs: ${jobs.size}`);
-    console.log(`Current EST time: ${currentTimeInEST()}`);
-    console.log(`Current EST date: ${todayInEST()}`);
-    console.log(`User data entries: ${Object.keys(userData).length}`);
-
-    if (scheduledMessages.length > 0) {
-      console.log('Scheduled Messages:');
-      scheduledMessages.forEach(msg => {
-        const nextRun = msg.repeat === 'none' ?
-          `${msg.date} at ${msg.time}` :
-          `${msg.repeat} at ${msg.time}`;
-        console.log(`  - ${msg.type}: ${nextRun} -> #${msg.channel}`);
-      });
-    }
-
-    console.log('Available commands:');
-    console.log('  /cat - Main menu');
-    console.log('  /capacity - Direct capacity check');
-    console.log('  /help - Create help button');
-    console.log('  /manage - Message management');
-    console.log('  /cat-debug - Debug testing');
-    console.log('  /cat-form-debug - Form data debugging');
-    console.log('All poll action handlers initialized successfully');
-    console.log('All systems ready!');
-  } catch (error) {
-    console.error('Failed to start app:', error);
-    process.exit(1);
-  }
-})();
-
-process.on('SIGINT', () => {
-  console.log(`${cat()} Shutting down, cleaning up jobs...`);
-  jobs.forEach(job => job.destroy());
-  process.exit(0);
-});.postEphemeral({
-            channel: body.user.id,
-            user: userId,
-            text: resultMessage
-          });
-        } catch (e) {
-          console.log('Could not send ephemeral result message.');
-        }
-      } else {
-        const existingIndex = scheduledMessages.findIndex(m => m.id === data.id);
-        if (existingIndex >= 0) {
-          scheduledMessages[existingIndex] = data;
-        } else {
-          scheduledMessages.push(data);
-        }
-
-        saveMessages();
-        scheduleJob(data);
-
-        const successMessage = `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`;
-
-        try {
-          await client.chat
+      if
