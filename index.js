@@ -751,7 +751,7 @@ function createModal(page, data = {}) {
     ...(page !== 'capacity' && page !== 'help' ? [{
       type: 'input',
       block_id: 'title_block',
-      label: { type: 'plain_text', text: 'Title (optional)' },
+      label: { type: 'plain_text', text: 'Title' },
       element: {
         type: 'plain_text_input',
         action_id: 'title_input',
