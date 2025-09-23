@@ -852,7 +852,7 @@ function createModal(page, data = {}) {
       );
 
       const options = data.pollOptions ?
-        data.pollOptions.split('\n').filter(o => o.trim()) :
+        data.pollOptions.split('\n') :
         ['', ''];
 
       // Ensure we have at least 2 options
@@ -2319,7 +2319,7 @@ app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
   }
 });
 
-// ENHANCED POLL VOTING HANDLER
+// ENHANCED POLL VOTING HANDLER (Updated - no ephemeral notifications)
 app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
   await ack();
   
@@ -2498,19 +2498,8 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
       await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
     }
 
-    // Send confirmation to user
-    try {
-      const voteStatus = pollVotes[msgId][optionIndex].has(user) ? 'Vote added' : 'Vote removed';
-      const optionText = options[optionIndex];
-        
-      await client.chat.postEphemeral({
-        channel: channel || user,
-        user: user,
-        text: `${voteStatus} for "${optionText}"!`
-      });
-    } catch (epErr) {
-      console.log('Could not send ephemeral vote confirmation.');
-    }
+    // REMOVED: Ephemeral vote confirmation messages
+    // Users can see their vote status in the updated poll message
 
     console.log(`Vote processed for user ${user} on poll ${msgId}`);
     
