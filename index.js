@@ -1895,21 +1895,23 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
 
     // Extract all current options from the form
     let options = [];
-    let enhancedOptions = {};
+    let enhancedOptions = data.enhancedOptions || {};
     let index = 0;
+    
     while (values[`option_${index}_block`]) {
       const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
       options.push(optionValue || '');
       
-      // Preserve enhanced option data
-      const existingData = data.enhancedOptions?.[index] || {};
-      enhancedOptions[index] = {
-        ...existingData,
-        description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingData.description || '',
-        imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingData.imageUrl || '',
-        linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingData.linkUrl || '',
-        linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingData.linkText || ''
-      };
+      // Preserve enhanced option data only if the detail fields exist
+      if (enhancedOptions[index]) {
+        enhancedOptions[index] = {
+          ...enhancedOptions[index],
+          description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || enhancedOptions[index].description || '',
+          imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || enhancedOptions[index].imageUrl || '',
+          linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || enhancedOptions[index].linkUrl || '',
+          linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || enhancedOptions[index].linkText || ''
+        };
+      }
       index++;
     }
 
@@ -1942,21 +1944,23 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
 
     // Extract all current options from the form
     let options = [];
-    let enhancedOptions = {};
+    let enhancedOptions = data.enhancedOptions || {};
     let index = 0;
+    
     while (values[`option_${index}_block`]) {
       const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
       options.push(optionValue || '');
       
-      // Preserve enhanced option data
-      const existingData = data.enhancedOptions?.[index] || {};
-      enhancedOptions[index] = {
-        ...existingData,
-        description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingData.description || '',
-        imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingData.imageUrl || '',
-        linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingData.linkUrl || '',
-        linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingData.linkText || ''
-      };
+      // Preserve enhanced option data only if the detail fields exist
+      if (enhancedOptions[index]) {
+        enhancedOptions[index] = {
+          ...enhancedOptions[index],
+          description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || enhancedOptions[index].description || '',
+          imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || enhancedOptions[index].imageUrl || '',
+          linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || enhancedOptions[index].linkUrl || '',
+          linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || enhancedOptions[index].linkText || ''
+        };
+      }
       index++;
     }
 
@@ -1986,9 +1990,25 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
 app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
   await ack();
   try {
+    console.log('Toggle option details triggered:', body.actions[0].action_id);
     const userId = body.user.id;
     const optionIndex = parseInt(body.actions[0].value);
     let data = formData.get(userId) || {};
+    const values = body.view.state.values;
+    
+    // First, save any current form data
+    if (values) {
+      let options = [];
+      let index = 0;
+      while (values[`option_${index}_block`]) {
+        const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
+        options.push(optionValue || '');
+        index++;
+      }
+      if (options.length > 0) {
+        data.pollOptions = options.join('\n');
+      }
+    }
     
     // Initialize enhancedOptions if it doesn't exist
     if (!data.enhancedOptions) {
@@ -1997,11 +2017,13 @@ app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
     
     // Initialize this option's data if it doesn't exist
     if (!data.enhancedOptions[optionIndex]) {
-      data.enhancedOptions[optionIndex] = {};
+      data.enhancedOptions[optionIndex] = { showDetails: false };
     }
     
     // Toggle the showDetails flag
     data.enhancedOptions[optionIndex].showDetails = !data.enhancedOptions[optionIndex].showDetails;
+    
+    console.log(`Toggling option ${optionIndex} details to:`, data.enhancedOptions[optionIndex].showDetails);
     
     formData.set(userId, data);
 
@@ -2011,6 +2033,7 @@ app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
     });
   } catch (error) {
     console.error('Toggle option details error:', error);
+    console.error('Error stack:', error.stack);
   }
 });
 
