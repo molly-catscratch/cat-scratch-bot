@@ -751,7 +751,7 @@ function createModal(page, data = {}) {
     ...(page !== 'capacity' && page !== 'help' ? [{
       type: 'input',
       block_id: 'title_block',
-      label: { type: 'plain_text', text: 'Title' },
+      label: { type: 'plain_text', text: 'Title (optional)' },
       element: {
         type: 'plain_text_input',
         action_id: 'title_input',
@@ -787,57 +787,17 @@ function createModal(page, data = {}) {
             type: 'radio_buttons',
             action_id: 'poll_type_radio',
             initial_option: data.pollType === 'single' ?
-              { text: { type: 'plain_text', text: 'Single choice - voters pick one option' }, value: 'single' } :
-              { text: { type: 'plain_text', text: 'Multiple choice - voters can pick several options' }, value: 'multiple' },
+              { text: { type: 'plain_text', text: 'Single choice' }, value: 'single' } :
+              { text: { type: 'plain_text', text: 'Multiple choice' }, value: 'multiple' },
             options: [
-              { text: { type: 'plain_text', text: 'Single choice - voters pick one option' }, value: 'single' },
-              { text: { type: 'plain_text', text: 'Multiple choice - voters can pick several options' }, value: 'multiple' }
+              { text: { type: 'plain_text', text: 'Single choice' }, value: 'single' },
+              { text: { type: 'plain_text', text: 'Multiple choice' }, value: 'multiple' }
             ]
           }
-        },
-        {
-          type: 'input',
-          block_id: 'poll_settings_section',
-          label: { type: 'plain_text', text: 'Poll Settings (optional)' },
-          element: {
-            type: 'checkboxes',
-            action_id: 'poll_settings_checkboxes',
-            ...(data.pollSettings && data.pollSettings.length > 0 ? {
-              initial_options: data.pollSettings.filter(setting => setting !== 'anonymous').map(setting => ({
-                text: { 
-                  type: 'plain_text', 
-                  text: setting === 'hidden' ? 'Hide results until poll closes' :
-                        setting === 'limited' ? 'Limit votes per person' :
-                        setting === 'allow_add' ? 'Let others add options' : setting
-                },
-                value: setting
-              }))
-            } : {}),
-            options: [
-              { text: { type: 'plain_text', text: 'Hide results until poll closes' }, value: 'hidden' },
-              { text: { type: 'plain_text', text: 'Limit votes per person' }, value: 'limited' },
-              { text: { type: 'plain_text', text: 'Let others add options' }, value: 'allow_add' }
-            ]
-          },
-          optional: true
         }
       );
 
-      // Vote limit input (conditional)
-      if (data.pollSettings?.includes('limited')) {
-        commonBlocks.push({
-          type: 'input',
-          block_id: 'vote_limit_section',
-          label: { type: 'plain_text', text: 'Maximum votes per person' },
-          element: {
-            type: 'number_input',
-            action_id: 'vote_limit_input',
-            initial_value: data.limit?.toString() || '1',
-            min_value: '1',
-            max_value: '10'
-          }
-        });
-      }
+      // Vote limit input (conditional) - REMOVED
 
       // Poll options section
       commonBlocks.push(
@@ -860,7 +820,13 @@ function createModal(page, data = {}) {
         options.push('');
       }
 
+      // Parse enhanced option data if it exists
+      const enhancedOptions = data.enhancedOptions || {};
+
       options.forEach((option, index) => {
+        const optionData = enhancedOptions[index] || {};
+        const showDetails = optionData.showDetails || false;
+
         commonBlocks.push({
           type: 'input',
           block_id: `option_${index}_block`,
@@ -871,8 +837,70 @@ function createModal(page, data = {}) {
             initial_value: option || '',
             placeholder: { type: 'plain_text', text: `Enter option ${index + 1}...` }
           },
-          optional: index >= 2
+          optional: index >= 2,
+          accessory: {
+            type: 'button',
+            text: { type: 'plain_text', text: showDetails ? 'Hide Details' : 'Add Details' },
+            action_id: `toggle_option_${index}_details`,
+            value: `${index}`
+          }
         });
+
+        // Show detailed fields if toggled on
+        if (showDetails) {
+          commonBlocks.push({
+            type: 'input',
+            block_id: `option_${index}_description_block`,
+            label: { type: 'plain_text', text: `Description (optional)` },
+            element: {
+              type: 'plain_text_input',
+              action_id: `option_${index}_description_input`,
+              initial_value: optionData.description || '',
+              placeholder: { type: 'plain_text', text: 'Add a description for this option...' },
+              multiline: true
+            },
+            optional: true
+          });
+
+          commonBlocks.push({
+            type: 'input',
+            block_id: `option_${index}_image_block`,
+            label: { type: 'plain_text', text: `Image URL (optional)` },
+            element: {
+              type: 'url_text_input',
+              action_id: `option_${index}_image_input`,
+              initial_value: optionData.imageUrl || '',
+              placeholder: { type: 'plain_text', text: 'https://example.com/image.jpg' }
+            },
+            optional: true
+          });
+
+          commonBlocks.push({
+            type: 'input',
+            block_id: `option_${index}_link_block`,
+            label: { type: 'plain_text', text: `Link URL (optional)` },
+            element: {
+              type: 'url_text_input',
+              action_id: `option_${index}_link_input`,
+              initial_value: optionData.linkUrl || '',
+              placeholder: { type: 'plain_text', text: 'https://example.com/more-info' }
+            },
+            optional: true
+          });
+
+          commonBlocks.push({
+            type: 'input',
+            block_id: `option_${index}_link_text_block`,
+            label: { type: 'plain_text', text: `Link Text (optional)` },
+            element: {
+              type: 'plain_text_input',
+              action_id: `option_${index}_link_text_input`,
+              initial_value: optionData.linkText || '',
+              placeholder: { type: 'plain_text', text: 'Learn more' }
+            },
+            optional: true
+          });
+        }
       });
 
       // Dynamic option management buttons
@@ -962,10 +990,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
     console.log('Updating poll message:', { channel, messageTs, pollData: pollData.id });
     
     const options = (pollData.pollOptions || '').split('\n').filter(Boolean);
-    const showCounts = pollData.pollSettings?.includes('show_counts') !== false; // Default to true
-    const isHidden = pollData.pollSettings?.includes('hidden') || false;
-    const isLimited = pollData.pollSettings?.includes('limited') || false;
-    const limit = pollData.limit || 1;
     const isClosed = pollData.isClosed || false;
     
     let blocks = [
@@ -979,10 +1003,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
           type: 'overflow',
           action_id: 'poll_menu',
           options: [
-            {
-              text: { type: 'plain_text', text: isHidden ? 'Reveal Results' : 'Hide Results' },
-              value: JSON.stringify({ action: 'toggle_hidden', pollId: pollData.id, createdBy: pollData.createdBy })
-            },
             {
               text: { type: 'plain_text', text: isClosed ? 'Reopen Poll' : 'Close Poll' },
               value: JSON.stringify({ action: 'toggle_closed', pollId: pollData.id, createdBy: pollData.createdBy })
@@ -1018,14 +1038,6 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
       statusElements.push({ type: 'mrkdwn', text: '🔲 Multiple choice' });
     }
     
-    if (isLimited) {
-      statusElements.push({ type: 'mrkdwn', text: `📊 Max ${limit} choice${limit !== 1 ? 's' : ''}` });
-    }
-    
-    if (isHidden) {
-      statusElements.push({ type: 'mrkdwn', text: '👁️‍🗨️ Results hidden' });
-    }
-    
     if (isClosed) {
       statusElements.push({ type: 'mrkdwn', text: '🔒 Poll closed' });
     }
@@ -1040,25 +1052,32 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
     blocks.push({ type: 'divider' });
 
     if (options.length > 0) {
-      // Enhanced option blocks with vote buttons and real-time counts
+      // Enhanced option blocks with vote buttons and rich content
       options.forEach((option, idx) => {
         const voteCount = votes[idx] ? votes[idx].size : 0;
         const voters = votes[idx] ? Array.from(votes[idx]) : [];
+        const enhancedData = pollData.enhancedOptions?.[idx] || {};
         
         // Create vote button with different styles based on poll state
-        let buttonStyle = undefined;
         let buttonText = 'Vote';
         
         if (isClosed) {
           buttonText = 'Closed';
         }
         
+        // Build option text with enhanced content
+        let optionText = `*${idx + 1}.* ${option}`;
+        
+        if (enhancedData.description) {
+          optionText += `\n_${enhancedData.description}_`;
+        }
+        
         // Option section with vote button
-        blocks.push({
+        const optionBlock = {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: `*${idx + 1}.* ${option}`
+            text: optionText
           },
           accessory: {
             type: 'button',
@@ -1066,28 +1085,40 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
               type: 'plain_text',
               text: buttonText
             },
-            style: buttonStyle,
             action_id: isClosed ? 'poll_closed' : `poll_vote_${pollData.id}_${idx}`,
             value: JSON.stringify({ 
               optionIndex: idx, 
               pollId: pollData.id, 
-              pollType: pollData.pollType,
-              isLimited: isLimited,
-              limit: limit
+              pollType: pollData.pollType
             })
           }
-        });
+        };
+        
+        blocks.push(optionBlock);
+
+        // Add image if provided
+        if (enhancedData.imageUrl) {
+          blocks.push({
+            type: 'image',
+            image_url: enhancedData.imageUrl,
+            alt_text: `Image for ${option}`
+          });
+        }
+
+        // Add link if provided
+        if (enhancedData.linkUrl) {
+          const linkText = enhancedData.linkText || 'Learn more';
+          blocks.push({
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: `🔗 <${enhancedData.linkUrl}|${linkText}>`
+            }
+          });
+        }
 
         // Vote display logic
-        if (isHidden && !isClosed) {
-          blocks.push({
-            type: 'context',
-            elements: [{
-              type: 'mrkdwn',
-              text: '👁️ Results hidden until poll closes'
-            }]
-          });
-        } else if (voteCount === 0) {
+        if (voteCount === 0) {
           blocks.push({
             type: 'context',
             elements: [{
@@ -1117,6 +1148,11 @@ async function updatePollMessage(client, channel, messageTs, pollData, votes) {
               }]
             });
           }
+        }
+
+        // Add spacing between options if there are enhanced elements
+        if (enhancedData.description || enhancedData.imageUrl || enhancedData.linkUrl) {
+          blocks.push({ type: 'divider' });
         }
       });
     }
@@ -1572,18 +1608,28 @@ app.event('app_home_opened', async ({ event, client }) => {
             const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
             data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
 
-            const settingsBlock = values?.poll_settings_section?.poll_settings_checkboxes;
-            data.pollSettings = settingsBlock?.selected_options?.map(opt => opt.value) || data.pollSettings || [];
-
+            // Extract poll options and enhanced data
             let extractedOptions = [];
+            let enhancedOptions = {};
             let index = 0;
             while (values[`option_${index}_block`]) {
               const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
               if (optionValue) extractedOptions.push(optionValue);
+              
+              // Preserve enhanced option data if it exists
+              const existingData = data.enhancedOptions?.[index] || {};
+              enhancedOptions[index] = {
+                ...existingData,
+                description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingData.description || '',
+                imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingData.imageUrl || '',
+                linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingData.linkUrl || '',
+                linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingData.linkText || ''
+              };
               index++;
             }
             if (extractedOptions.length > 0) {
               data.pollOptions = extractedOptions.join('\n');
+              data.enhancedOptions = enhancedOptions;
             }
           }
 
@@ -1830,56 +1876,6 @@ app.action('poll_type_radio', async ({ ack, body, client }) => {
   }
 });
 
-// Enhanced poll form handlers
-app.action('poll_type_radio', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    const selectedType = body.actions[0].selected_option.value;
-    let data = formData.get(userId) || {};
-    data.pollType = selectedType;
-    formData.set(userId, data);
-    
-    await client.views.update({
-      view_id: body.view.id,
-      view: createModal('poll', data)
-    });
-  } catch (error) {
-    console.error('Poll type radio error:', error);
-  }
-});
-
-app.action('poll_settings_checkboxes', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    let data = formData.get(userId) || {};
-    const selectedOptions = body.actions[0].selected_options || [];
-    data.pollSettings = selectedOptions.map(opt => opt.value);
-    formData.set(userId, data);
-    
-    await client.views.update({
-      view_id: body.view.id,
-      view: createModal('poll', data)
-    });
-  } catch (error) {
-    console.error('Poll settings error:', error);
-  }
-});
-
-app.action('vote_limit_input', async ({ ack, body, client }) => {
-  await ack();
-  try {
-    const userId = body.user.id;
-    let data = formData.get(userId) || {};
-    const limitValue = body.actions[0].value;
-    data.limit = parseInt(limitValue) || 1;
-    formData.set(userId, data);
-  } catch (error) {
-    console.error('Vote limit input error:', error);
-  }
-});
-
 app.action('add_poll_option', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1889,18 +1885,31 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
 
     // Extract all current options from the form
     let options = [];
+    let enhancedOptions = {};
     let index = 0;
     while (values[`option_${index}_block`]) {
       const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
       options.push(optionValue || '');
+      
+      // Preserve enhanced option data
+      const existingData = data.enhancedOptions?.[index] || {};
+      enhancedOptions[index] = {
+        ...existingData,
+        description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingData.description || '',
+        imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingData.imageUrl || '',
+        linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingData.linkUrl || '',
+        linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingData.linkText || ''
+      };
       index++;
     }
 
     // Add one more empty option
     options.push('');
+    enhancedOptions[options.length - 1] = { showDetails: false };
 
     // Update form data
     data.pollOptions = options.join('\n');
+    data.enhancedOptions = enhancedOptions;
     formData.set(userId, data);
 
     console.log('Adding poll option. New options:', options);
@@ -1923,20 +1932,33 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
 
     // Extract all current options from the form
     let options = [];
+    let enhancedOptions = {};
     let index = 0;
     while (values[`option_${index}_block`]) {
       const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
       options.push(optionValue || '');
+      
+      // Preserve enhanced option data
+      const existingData = data.enhancedOptions?.[index] || {};
+      enhancedOptions[index] = {
+        ...existingData,
+        description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingData.description || '',
+        imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingData.imageUrl || '',
+        linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingData.linkUrl || '',
+        linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingData.linkText || ''
+      };
       index++;
     }
 
     // Remove the last option if we have more than 2
     if (options.length > 2) {
       options.pop();
+      delete enhancedOptions[options.length]; // Remove the enhanced data for the deleted option
     }
 
     // Update form data
     data.pollOptions = options.join('\n');
+    data.enhancedOptions = enhancedOptions;
     formData.set(userId, data);
 
     console.log('Removing poll option. New options:', options);
@@ -1947,6 +1969,38 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
     });
   } catch (error) {
     console.error('Remove poll option error:', error);
+  }
+});
+
+// Toggle option details handler
+app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    const optionIndex = parseInt(body.actions[0].value);
+    let data = formData.get(userId) || {};
+    
+    // Initialize enhancedOptions if it doesn't exist
+    if (!data.enhancedOptions) {
+      data.enhancedOptions = {};
+    }
+    
+    // Initialize this option's data if it doesn't exist
+    if (!data.enhancedOptions[optionIndex]) {
+      data.enhancedOptions[optionIndex] = {};
+    }
+    
+    // Toggle the showDetails flag
+    data.enhancedOptions[optionIndex].showDetails = !data.enhancedOptions[optionIndex].showDetails;
+    
+    formData.set(userId, data);
+
+    await client.views.update({
+      view_id: body.view.id,
+      view: createModal('poll', data)
+    });
+  } catch (error) {
+    console.error('Toggle option details error:', error);
   }
 });
 
@@ -1982,9 +2036,6 @@ app.action('poll_menu', async ({ ack, body, client }) => {
     }
 
     switch (actionData.action) {
-      case 'toggle_hidden':
-        await togglePollHidden(client, channel, messageTs, pollData, user);
-        break;
       case 'toggle_closed':
         await togglePollClosed(client, channel, messageTs, pollData, user);
         break;
@@ -2001,30 +2052,6 @@ app.action('poll_menu', async ({ ack, body, client }) => {
 });
 
 // Poll Management Functions
-async function togglePollHidden(client, channel, messageTs, pollData, userId) {
-  try {
-    pollData.pollSettings = pollData.pollSettings || [];
-    const isHidden = pollData.pollSettings.includes('hidden');
-    
-    if (isHidden) {
-      pollData.pollSettings = pollData.pollSettings.filter(s => s !== 'hidden');
-    } else {
-      pollData.pollSettings.push('hidden');
-    }
-    
-    activePollMessages.set(messageTs, pollData);
-    await updatePollMessage(client, channel, messageTs, pollData, pollVotes[pollData.id] || {});
-    
-    await client.chat.postEphemeral({
-      channel: channel,
-      user: userId,
-      text: isHidden ? 'Poll results are now visible!' : 'Poll results are now hidden!'
-    });
-  } catch (error) {
-    console.error('Toggle hidden error:', error);
-  }
-}
-
 async function togglePollClosed(client, channel, messageTs, pollData, userId) {
   try {
     pollData.isClosed = !pollData.isClosed;
