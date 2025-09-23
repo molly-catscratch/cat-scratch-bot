@@ -776,6 +776,12 @@ function createModal(page, data = {}) {
 
   // ENHANCED POLL BLOCKS
   if (page === 'poll') {
+    console.log('Creating poll modal with data:', {
+      pollType: data.pollType,
+      pollOptions: data.pollOptions,
+      enhancedOptions: data.enhancedOptions ? Object.keys(data.enhancedOptions) : 'none'
+    });
+
     try {
       commonBlocks.push(
         { type: 'divider' },
@@ -796,8 +802,6 @@ function createModal(page, data = {}) {
           }
         }
       );
-
-      // Vote limit input (conditional) - REMOVED
 
       // Poll options section
       commonBlocks.push(
@@ -942,6 +946,8 @@ function createModal(page, data = {}) {
           elements: actionElements
         });
       }
+
+      console.log('Poll form blocks created, enhanced options:', data.enhancedOptions);
 
     } catch (error) {
       console.error('Error creating poll form:', error);
@@ -1581,89 +1587,133 @@ app.event('app_home_opened', async ({ event, client }) => {
 // NAVIGATION HANDLERS
 // ================================
 
-['nav_menu', 'nav_scheduled', 'nav_preview', 'nav_schedule'].forEach(action => {
+['nav_menu', 'nav_scheduled'].forEach(action => {
   app.action(action, async ({ ack, body, client }) => {
     await ack();
     try {
       const page = action.replace('nav_', '');
-      const userId = body.user.id;
-      let data = {};
-
-      if (page !== 'menu' && page !== 'scheduled') {
-        data = formData.get(userId) || {};
-
-        if ((page === 'preview' || page === 'schedule') && body.view?.state?.values) {
-          const values = body.view.state.values;
-
-          data = {
-            ...data,
-            ...(data.type !== 'capacity' && data.type !== 'help' && {
-              title: getFormValue(values, 'title_block', 'title_input') || data.title
-            }),
-            text: getFormValue(values, 'text_block', 'text_input') || data.text,
-          };
-
-          if (data.text && data.type) {
-            data.userModifiedText = hasUserModifiedTemplate(data.type, data.text);
-          }
-
-          if (page === 'schedule' || page === 'preview') {
-            data.channel = getFormValue(values, 'channel_block', 'channel_select', 'conversation') || data.channel;
-            data.date = getFormValue(values, 'date_block', 'date_picker', 'date') || data.date;
-            data.time = getFormValue(values, 'time_block', 'time_picker', 'time') || data.time;
-            data.repeat = getFormValue(values, 'repeat_block', 'repeat_select', 'selected') || data.repeat || 'none';
-          }
-
-          if (data.type === 'poll') {
-            const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
-            data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
-
-            // Extract poll options and enhanced data
-            let extractedOptions = [];
-            let enhancedOptions = {};
-            let index = 0;
-            while (values[`option_${index}_block`]) {
-              const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
-              if (optionValue) extractedOptions.push(optionValue);
-              
-              // Preserve enhanced option data if it exists
-              const existingData = data.enhancedOptions?.[index] || {};
-              enhancedOptions[index] = {
-                ...existingData,
-                description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingData.description || '',
-                imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingData.imageUrl || '',
-                linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingData.linkUrl || '',
-                linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingData.linkText || ''
-              };
-              index++;
-            }
-            if (extractedOptions.length > 0) {
-              data.pollOptions = extractedOptions.join('\n');
-              data.enhancedOptions = enhancedOptions;
-            }
-          }
-
-          if (data.type === 'help') {
-            const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
-            data.alertChannels = extractedAlertChannels || data.alertChannels || [];
-          }
-        }
-
-        if (!data.scheduleType) {
-          data.scheduleType = 'schedule';
-        }
-
-        formData.set(userId, data);
-      }
-
       await client.views.update({
         view_id: body.view.id,
-        view: createModal(page, data)
+        view: createModal(page, {})
       });
     } catch (error) {
       console.error(`Failed to navigate to ${action}:`, error);
     }
   });
+});
+
+// FIXED: Enhanced preview navigation handler
+app.action('nav_preview', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    let data = formData.get(userId) || {};
+    
+    if (body.view?.state?.values) {
+      const values = body.view.state.values;
+      
+      // Extract all form data including poll-specific fields
+      data = {
+        ...data,
+        ...(data.type !== 'capacity' && data.type !== 'help' && {
+          title: getFormValue(values, 'title_block', 'title_input') || data.title
+        }),
+        text: getFormValue(values, 'text_block', 'text_input') || data.text,
+      };
+
+      if (data.text && data.type) {
+        data.userModifiedText = hasUserModifiedTemplate(data.type, data.text);
+      }
+
+      // Poll-specific data extraction
+      if (data.type === 'poll') {
+        const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
+        data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
+
+        // Extract poll options and enhanced data
+        let extractedOptions = [];
+        let enhancedOptions = data.enhancedOptions || {};
+        let index = 0;
+        
+        while (values[`option_${index}_block`]) {
+          const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
+          if (optionValue) extractedOptions.push(optionValue);
+          
+          // Preserve enhanced option data
+          const existingData = enhancedOptions[index] || {};
+          enhancedOptions[index] = {
+            showDetails: existingData.showDetails || false,
+            description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingData.description || '',
+            imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingData.imageUrl || '',
+            linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingData.linkUrl || '',
+            linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingData.linkText || ''
+          };
+          index++;
+        }
+        
+        if (extractedOptions.length >= 2) {
+          data.pollOptions = extractedOptions.join('\n');
+          data.enhancedOptions = enhancedOptions;
+        }
+      }
+
+      if (data.type === 'help') {
+        const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
+        data.alertChannels = extractedAlertChannels || data.alertChannels || [];
+      }
+      
+      formData.set(userId, data);
+    }
+
+    await client.views.update({
+      view_id: body.view.id,
+      view: createModal('preview', data)
+    });
+  } catch (error) {
+    console.error('Preview navigation error:', error);
+  }
+});
+
+app.action('nav_schedule', async ({ ack, body, client }) => {
+  await ack();
+  try {
+    const userId = body.user.id;
+    let data = formData.get(userId) || {};
+
+    if (body.view?.state?.values) {
+      const values = body.view.state.values;
+
+      data = {
+        ...data,
+        ...(data.type !== 'capacity' && data.type !== 'help' && {
+          title: getFormValue(values, 'title_block', 'title_input') || data.title
+        }),
+        text: getFormValue(values, 'text_block', 'text_input') || data.text,
+        channel: getFormValue(values, 'channel_block', 'channel_select', 'conversation') || data.channel,
+        date: getFormValue(values, 'date_block', 'date_picker', 'date') || data.date,
+        time: getFormValue(values, 'time_block', 'time_picker', 'time') || data.time,
+        repeat: getFormValue(values, 'repeat_block', 'repeat_select', 'selected') || data.repeat || 'none'
+      };
+
+      if (data.type === 'help') {
+        const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
+        data.alertChannels = extractedAlertChannels || data.alertChannels || [];
+      }
+
+      if (!data.scheduleType) {
+        data.scheduleType = 'schedule';
+      }
+
+      formData.set(userId, data);
+    }
+
+    await client.views.update({
+      view_id: body.view.id,
+      view: createModal('schedule', data)
+    });
+  } catch (error) {
+    console.error('Failed to navigate to schedule:', error);
+  }
 });
 
 // Form type navigation handlers
@@ -1867,7 +1917,11 @@ app.action('alert_channels_select', async ({ ack, body, client }) => {
   }
 });
 
-// Enhanced poll form handlers
+// ================================
+// ENHANCED POLL FORM HANDLERS - FIXED
+// ================================
+
+// 1. Poll type selection handler - WORKING
 app.action('poll_type_radio', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1876,6 +1930,8 @@ app.action('poll_type_radio', async ({ ack, body, client }) => {
     let data = formData.get(userId) || {};
     data.pollType = selectedType;
     formData.set(userId, data);
+    
+    console.log(`Poll type changed to: ${selectedType}`);
     
     await client.views.update({
       view_id: body.view.id,
@@ -1886,6 +1942,7 @@ app.action('poll_type_radio', async ({ ack, body, client }) => {
   }
 });
 
+// 2. Add poll option handler - FIXED
 app.action('add_poll_option', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1893,38 +1950,61 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
     let data = formData.get(userId) || {};
     const values = body.view.state.values;
 
-    // Extract all current options from the form
+    console.log('Add option triggered - preserving form state');
+
+    // Preserve all current form field values first
+    data = {
+      ...data,
+      ...(data.type !== 'capacity' && data.type !== 'help' && {
+        title: getFormValue(values, 'title_block', 'title_input') || data.title
+      }),
+      text: getFormValue(values, 'text_block', 'text_input') || data.text,
+    };
+
+    // Update poll type if it changed
+    const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
+    if (pollTypeBlock) {
+      data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
+    }
+
+    // Extract all current options and enhanced data
     let options = [];
     let enhancedOptions = data.enhancedOptions || {};
     let index = 0;
     
     while (values[`option_${index}_block`]) {
-      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
+      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
       options.push(optionValue || '');
       
-      // Preserve enhanced option data only if the detail fields exist
-      if (enhancedOptions[index]) {
-        enhancedOptions[index] = {
-          ...enhancedOptions[index],
-          description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || enhancedOptions[index].description || '',
-          imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || enhancedOptions[index].imageUrl || '',
-          linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || enhancedOptions[index].linkUrl || '',
-          linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || enhancedOptions[index].linkText || ''
-        };
-      }
+      // Preserve enhanced option data
+      const existingEnhanced = enhancedOptions[index] || {};
+      enhancedOptions[index] = {
+        showDetails: existingEnhanced.showDetails || false,
+        description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingEnhanced.description || '',
+        imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingEnhanced.imageUrl || '',
+        linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingEnhanced.linkUrl || '',
+        linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingEnhanced.linkText || ''
+      };
       index++;
     }
 
-    // Add one more empty option
-    options.push('');
-    enhancedOptions[options.length - 1] = { showDetails: false };
+    // Add one more empty option (max 10 total)
+    if (options.length < 10) {
+      options.push('');
+      enhancedOptions[options.length - 1] = { 
+        showDetails: false,
+        description: '',
+        imageUrl: '',
+        linkUrl: '',
+        linkText: ''
+      };
+    }
 
-    // Update form data
     data.pollOptions = options.join('\n');
     data.enhancedOptions = enhancedOptions;
     formData.set(userId, data);
 
-    console.log('Adding poll option. New options:', options);
+    console.log(`Added option. Total options: ${options.length}`);
 
     await client.views.update({
       view_id: body.view.id,
@@ -1932,9 +2012,11 @@ app.action('add_poll_option', async ({ ack, body, client }) => {
     });
   } catch (error) {
     console.error('Add poll option error:', error);
+    console.error('Stack:', error.stack);
   }
 });
 
+// 3. Remove poll option handler - FIXED
 app.action('remove_poll_option', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -1942,40 +2024,56 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
     let data = formData.get(userId) || {};
     const values = body.view.state.values;
 
-    // Extract all current options from the form
+    console.log('Remove option triggered - preserving form state');
+
+    // Preserve all current form field values first
+    data = {
+      ...data,
+      ...(data.type !== 'capacity' && data.type !== 'help' && {
+        title: getFormValue(values, 'title_block', 'title_input') || data.title
+      }),
+      text: getFormValue(values, 'text_block', 'text_input') || data.text,
+    };
+
+    // Update poll type
+    const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
+    if (pollTypeBlock) {
+      data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
+    }
+
+    // Extract all current options and enhanced data
     let options = [];
     let enhancedOptions = data.enhancedOptions || {};
     let index = 0;
     
     while (values[`option_${index}_block`]) {
-      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
+      const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
       options.push(optionValue || '');
       
-      // Preserve enhanced option data only if the detail fields exist
-      if (enhancedOptions[index]) {
-        enhancedOptions[index] = {
-          ...enhancedOptions[index],
-          description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || enhancedOptions[index].description || '',
-          imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || enhancedOptions[index].imageUrl || '',
-          linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || enhancedOptions[index].linkUrl || '',
-          linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || enhancedOptions[index].linkText || ''
-        };
-      }
+      // Preserve enhanced option data
+      const existingEnhanced = enhancedOptions[index] || {};
+      enhancedOptions[index] = {
+        showDetails: existingEnhanced.showDetails || false,
+        description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingEnhanced.description || '',
+        imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingEnhanced.imageUrl || '',
+        linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingEnhanced.linkUrl || '',
+        linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingEnhanced.linkText || ''
+      };
       index++;
     }
 
-    // Remove the last option if we have more than 2
+    // Remove the last option if we have more than 2 (minimum required)
     if (options.length > 2) {
+      const removedIndex = options.length - 1;
       options.pop();
-      delete enhancedOptions[options.length]; // Remove the enhanced data for the deleted option
+      delete enhancedOptions[removedIndex];
     }
 
-    // Update form data
     data.pollOptions = options.join('\n');
     data.enhancedOptions = enhancedOptions;
     formData.set(userId, data);
 
-    console.log('Removing poll option. New options:', options);
+    console.log(`Removed option. Total options: ${options.length}`);
 
     await client.views.update({
       view_id: body.view.id,
@@ -1986,44 +2084,79 @@ app.action('remove_poll_option', async ({ ack, body, client }) => {
   }
 });
 
-// Toggle option details handler
+// 4. Toggle option details handler - FIXED
 app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
   await ack();
   try {
-    console.log('Toggle option details triggered:', body.actions[0].action_id);
     const userId = body.user.id;
     const optionIndex = parseInt(body.actions[0].value);
     let data = formData.get(userId) || {};
     const values = body.view.state.values;
     
-    // First, save any current form data
+    console.log(`Toggling details for option ${optionIndex}`);
+    
+    // Preserve all current form data INCLUDING enhanced fields
     if (values) {
+      // Main form fields
+      data = {
+        ...data,
+        ...(data.type !== 'capacity' && data.type !== 'help' && {
+          title: getFormValue(values, 'title_block', 'title_input') || data.title
+        }),
+        text: getFormValue(values, 'text_block', 'text_input') || data.text,
+      };
+
+      // Poll type
+      const pollTypeBlock = values?.poll_type_section?.poll_type_radio;
+      if (pollTypeBlock) {
+        data.pollType = pollTypeBlock?.selected_option?.value || data.pollType || 'multiple';
+      }
+
+      // Extract and preserve ALL option data
       let options = [];
+      let enhancedOptions = data.enhancedOptions || {};
       let index = 0;
+      
       while (values[`option_${index}_block`]) {
-        const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value;
+        const optionValue = values[`option_${index}_block`][`option_${index}_input`]?.value?.trim();
         options.push(optionValue || '');
+        
+        // Preserve existing enhanced data and update with current form values
+        const existingEnhanced = enhancedOptions[index] || {};
+        enhancedOptions[index] = {
+          showDetails: existingEnhanced.showDetails || false,
+          description: values[`option_${index}_description_block`]?.[`option_${index}_description_input`]?.value || existingEnhanced.description || '',
+          imageUrl: values[`option_${index}_image_block`]?.[`option_${index}_image_input`]?.value || existingEnhanced.imageUrl || '',
+          linkUrl: values[`option_${index}_link_block`]?.[`option_${index}_link_input`]?.value || existingEnhanced.linkUrl || '',
+          linkText: values[`option_${index}_link_text_block`]?.[`option_${index}_link_text_input`]?.value || existingEnhanced.linkText || ''
+        };
         index++;
       }
-      if (options.length > 0) {
-        data.pollOptions = options.join('\n');
-      }
+      
+      data.pollOptions = options.join('\n');
+      data.enhancedOptions = enhancedOptions;
     }
     
-    // Initialize enhancedOptions if it doesn't exist
+    // Initialize enhancedOptions if needed
     if (!data.enhancedOptions) {
       data.enhancedOptions = {};
     }
     
-    // Initialize this option's data if it doesn't exist
+    // Initialize this option if needed
     if (!data.enhancedOptions[optionIndex]) {
-      data.enhancedOptions[optionIndex] = { showDetails: false };
+      data.enhancedOptions[optionIndex] = { 
+        showDetails: false,
+        description: '',
+        imageUrl: '',
+        linkUrl: '',
+        linkText: ''
+      };
     }
     
     // Toggle the showDetails flag
     data.enhancedOptions[optionIndex].showDetails = !data.enhancedOptions[optionIndex].showDetails;
     
-    console.log(`Toggling option ${optionIndex} details to:`, data.enhancedOptions[optionIndex].showDetails);
+    console.log(`Option ${optionIndex} details toggled to: ${data.enhancedOptions[optionIndex].showDetails}`);
     
     formData.set(userId, data);
 
@@ -2033,9 +2166,34 @@ app.action(/^toggle_option_\d+_details$/, async ({ ack, body, client }) => {
     });
   } catch (error) {
     console.error('Toggle option details error:', error);
-    console.error('Error stack:', error.stack);
+    console.error('Stack:', error.stack);
   }
 });
+
+// 5. Individual input field handlers for enhanced options
+for (let i = 0; i < 10; i++) {
+  // Basic option input
+  app.action(`option_${i}_input`, async ({ ack }) => {
+    await ack();
+  });
+  
+  // Enhanced option inputs
+  app.action(`option_${i}_description_input`, async ({ ack }) => {
+    await ack();
+  });
+  
+  app.action(`option_${i}_image_input`, async ({ ack }) => {
+    await ack();
+  });
+  
+  app.action(`option_${i}_link_input`, async ({ ack }) => {
+    await ack();
+  });
+  
+  app.action(`option_${i}_link_text_input`, async ({ ack }) => {
+    await ack();
+  });
+}
 
 // Enhanced Poll Management Actions
 app.action('poll_menu', async ({ ack, body, client }) => {
@@ -2311,28 +2469,6 @@ app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
           await client.chat.postEphemeral({
             channel: body.user.id,
             user: userId,
-            text: resultMessage
-          });
-        } catch (e) {
-          console.log('Could not send ephemeral result message.');
-        }
-      } else {
-        const existingIndex = scheduledMessages.findIndex(m => m.id === data.id);
-        if (existingIndex >= 0) {
-          scheduledMessages[existingIndex] = data;
-        } else {
-          scheduledMessages.push(data);
-        }
-
-        saveMessages();
-        scheduleJob(data);
-
-        const successMessage = `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`;
-
-        try {
-          await client.chat.postEphemeral({
-            channel: body.user.id,
-            user: userId,
             text: successMessage
           });
         } catch (e) {
@@ -2558,9 +2694,6 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
       await updatePollMessage(client, channel, messageTs, pollData, pollVotes[msgId]);
     }
 
-    // REMOVED: Ephemeral vote confirmation messages
-    // Users can see their vote status in the updated poll message
-
     console.log(`Vote processed for user ${user} on poll ${msgId}`);
     
   } catch (error) {
@@ -2696,9 +2829,15 @@ app.command('/cat-form-debug', async ({ ack, body, client }) => {
   });
 });
 
-// Error handling
+// Enhanced error handling with poll-specific logging
 app.error((error) => {
   console.error('Global error:', error);
+  if (error.message && error.message.includes('poll')) {
+    console.error('Poll-specific error details:', {
+      message: error.message,
+      stack: error.stack?.slice(0, 500)
+    });
+  }
 });
 
 // Cleanup expired messages
@@ -2767,8 +2906,10 @@ cron.schedule('0 * * * *', () => {
     console.log('  /cat - Main menu');
     console.log('  /capacity - Direct capacity check');
     console.log('  /help - Direct help button');
-    console.log('  /poll - Direct poll creation');
     console.log('  /manage - Message management');
+    console.log('  /cat-debug - Debug testing');
+    console.log('  /cat-form-debug - Form data debugging');
+    console.log('All poll action handlers initialized successfully');
     console.log('All systems ready!');
   } catch (error) {
     console.error('Failed to start app:', error);
@@ -2780,4 +2921,25 @@ process.on('SIGINT', () => {
   console.log(`${cat()} Shutting down, cleaning up jobs...`);
   jobs.forEach(job => job.destroy());
   process.exit(0);
-});
+            channel: body.user.id,
+            user: userId,
+            text: resultMessage
+          });
+        } catch (e) {
+          console.log('Could not send ephemeral result message.');
+        }
+      } else {
+        const existingIndex = scheduledMessages.findIndex(m => m.id === data.id);
+        if (existingIndex >= 0) {
+          scheduledMessages[existingIndex] = data;
+        } else {
+          scheduledMessages.push(data);
+        }
+
+        saveMessages();
+        scheduleJob(data);
+
+        const successMessage = `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`;
+
+        try {
+          await client.chat.postEphemeral({
