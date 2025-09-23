@@ -314,7 +314,7 @@ function createAppHome(userId) {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: '`/cat` - Opens the main menu for creating any type of message\n`/capacity` - Quick capacity check creation\n`/help` - Create a help button for your team\n`/poll` - Start building a poll right away\n`/manage` - View and manage your scheduled messages'
+        text: '`/cat` - Opens the main menu for creating any type of message\n`/capacity` - Quick capacity check creation\n`/help` - Create a help button for your team\n`/manage` - View and manage your scheduled messages'
       }
     },
     { type: 'divider' },
@@ -642,7 +642,7 @@ function createModal(page, data = {}) {
       }
     );
 
-    if (data.scheduleType === 'schedule' || !data.scheduleType) {
+    if (data.scheduleType === 'schedule') {
       scheduleBlocks.push(
         { type: 'divider' },
         { 
@@ -1481,31 +1481,6 @@ app.command('/help', async ({ ack, body, client }) => {
     });
   } catch (error) {
     console.error('Failed to open help modal:', error);
-  }
-});
-
-app.command('/poll', async ({ ack, body, client }) => {
-  await ack();
-  updateUserActivity(body.user_id);
-  try {
-    const userId = body.user_id;
-    const data = { 
-      type: 'poll', 
-      text: '', 
-      title: '', 
-      pollType: 'multiple', 
-      pollOptions: 'Option 1\nOption 2', 
-      pollSettings: [], 
-      scheduleType: 'schedule' 
-    };
-    formData.set(userId, data);
-    
-    await client.views.open({
-      trigger_id: body.trigger_id,
-      view: createModal('poll', data)
-    });
-  } catch (error) {
-    console.error('Failed to open poll modal:', error);
   }
 });
 
