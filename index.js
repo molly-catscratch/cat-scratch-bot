@@ -1921,7 +1921,7 @@ app.action('alert_channels_select', async ({ ack, body, client }) => {
 // ENHANCED POLL FORM HANDLERS - FIXED
 // ================================
 
-// 1. Poll type selection handler - WORKING
+// 1. Poll type selection handler
 app.action('poll_type_radio', async ({ ack, body, client }) => {
   await ack();
   try {
@@ -2515,7 +2515,7 @@ app.action(/^delete_message_.+/, async ({ ack, body, client, action }) => {
   }
 });
 
-// ENHANCED POLL VOTING HANDLER (Updated - no ephemeral notifications)
+// ENHANCED POLL VOTING HANDLER
 app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
   await ack();
   
@@ -2562,7 +2562,7 @@ app.action(/^poll_vote_.+/, async ({ ack, body, client, action }) => {
         if (block.type === 'section' && block.text?.text && !reconstructedTitle.includes('*')) {
           const titleMatch = block.text.text.match(/\*(.+?)\*/);
           if (titleMatch) {
-            reconstructedTitle = titleMatch[1].replace(/₍\^. \.\^\�/, '').trim();
+            reconstructedTitle = titleMatch[1].replace(/₍\^. \.\^₎/, '').trim();
           }
         }
         
@@ -2905,7 +2905,7 @@ cron.schedule('0 * * * *', () => {
     console.log('Available commands:');
     console.log('  /cat - Main menu');
     console.log('  /capacity - Direct capacity check');
-    console.log('  /help - Direct help button');
+    console.log('  /help - Create help button');
     console.log('  /manage - Message management');
     console.log('  /cat-debug - Debug testing');
     console.log('  /cat-form-debug - Form data debugging');
@@ -2921,6 +2921,7 @@ process.on('SIGINT', () => {
   console.log(`${cat()} Shutting down, cleaning up jobs...`);
   jobs.forEach(job => job.destroy());
   process.exit(0);
+});.postEphemeral({
             channel: body.user.id,
             user: userId,
             text: resultMessage
@@ -2942,4 +2943,4 @@ process.on('SIGINT', () => {
         const successMessage = `${data.type.charAt(0).toUpperCase() + data.type.slice(1)} message scheduled for <#${data.channel}>!${cat()}\n\n${data.date} at ${formatTimeDisplay(data.time)}\nRepeat: ${data.repeat !== 'none' ? data.repeat : 'One-time'}`;
 
         try {
-          await client.chat.postEphemeral({
+          await client.chat
