@@ -1522,6 +1522,8 @@ app.event('app_home_opened', async ({ event, client }) => {
     try {
       const actionType = action.replace('home_', '');
       const userId = body.user.id;
+      console.log(`Home action triggered: ${action} -> ${actionType} for user ${userId}`);
+      
       let data = {};
       
       if (actionType === 'capacity') {
@@ -1529,7 +1531,16 @@ app.event('app_home_opened', async ({ event, client }) => {
       } else if (actionType === 'help') {
         data = { type: 'help', text: templates.help, userModifiedText: false, alertChannels: [], scheduleType: 'schedule' };
       } else if (actionType === 'poll') {
-        data = { type: 'poll', text: '', title: '', pollType: 'multiple', pollOptions: 'Option 1\nOption 2', pollSettings: [], scheduleType: 'schedule' };
+        data = { 
+          type: 'poll', 
+          text: '', 
+          title: '', 
+          pollType: 'multiple', 
+          pollOptions: 'Option 1\nOption 2', 
+          pollSettings: [], 
+          scheduleType: 'schedule' 
+        };
+        console.log('Home poll data initialized:', data);
       } else if (actionType === 'custom') {
         data = { type: 'custom', text: '', title: '', scheduleType: 'schedule' };
       } else if (actionType === 'manage') {
@@ -1541,13 +1552,17 @@ app.event('app_home_opened', async ({ event, client }) => {
       }
       
       formData.set(userId, data);
+      console.log(`Home calling createModal(${actionType}, data)`);
       
       await client.views.open({
         trigger_id: body.trigger_id,
         view: createModal(actionType, data)
       });
+      
+      console.log(`Home modal opened successfully for ${actionType}`);
     } catch (error) {
       console.error(`Failed to handle home action ${action}:`, error);
+      console.error('Error stack:', error.stack);
     }
   });
 });
