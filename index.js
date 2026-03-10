@@ -1976,7 +1976,76 @@ app.view('confirm_delete_poll', async ({ ack, body, view, client }) => {
 // ================================
 
 app.view(/^scheduler_.+/, async ({ ack, body, view, client }) => {
-  if (body.view.callback_id === 'scheduler_schedule') {
+  const callbackId = body.view.callback_id;
+
+  // FIX: form pages (poll, capacity, help, custom) have a submit button labeled
+  // "Preview Message". Clicking it fires this view handler, not nav_preview.
+  // Without this block the modal simply closes. Intercept and redirect to preview.
+  if (['scheduler_poll', 'scheduler_capacity', 'scheduler_help', 'scheduler_custom'].includes(callbackId)) {
+    try {
+      await ack({ response_action: 'update', view: (() => {
+        const userId = body.user.id;
+        let data = formData.get(userId) || {};
+        const values = body.view.state.values;
+
+        data = { ...data };
+
+        if (data.type !== 'capacity' && data.type !== 'help') {
+          data.title = getFormValue(values, 'title_block', 'title_input') || data.title;
+        }
+        data.text = getFormValue(values, 'text_block', 'text_input') || data.text;
+
+        if (data.text && data.type) {
+          data.userModifiedText = hasUserModifiedTemplate(data.type, data.text);
+        }
+
+        if (data.type === 'poll') {
+          const pollTypeBlock = values && values.poll_type_section && values.poll_type_section.poll_type_radio;
+          data.pollType = (pollTypeBlock && pollTypeBlock.selected_option && pollTypeBlock.selected_option.value) || data.pollType || 'multiple';
+
+          let extractedOptions = [];
+          let enhancedOptions = data.enhancedOptions || {};
+          let index = 0;
+
+          while (values[`option_${index}_block`]) {
+            const optionValue = values[`option_${index}_block`][`option_${index}_input`] &&
+              values[`option_${index}_block`][`option_${index}_input`].value &&
+              values[`option_${index}_block`][`option_${index}_input`].value.trim();
+            // Include all options (even blank) so index alignment stays correct
+            extractedOptions.push(optionValue || '');
+
+            const existingData = enhancedOptions[index] || enhancedOptions[String(index)] || {};
+            enhancedOptions[index] = {
+              showDetails: existingData.showDetails || false,
+              description: (values[`option_${index}_description_block`] && values[`option_${index}_description_block`][`option_${index}_description_input`] && values[`option_${index}_description_block`][`option_${index}_description_input`].value) || existingData.description || '',
+              imageUrl: (values[`option_${index}_image_block`] && values[`option_${index}_image_block`][`option_${index}_image_input`] && values[`option_${index}_image_block`][`option_${index}_image_input`].value) || existingData.imageUrl || '',
+              linkUrl: (values[`option_${index}_link_block`] && values[`option_${index}_link_block`][`option_${index}_link_input`] && values[`option_${index}_link_block`][`option_${index}_link_input`].value) || existingData.linkUrl || '',
+              linkText: (values[`option_${index}_link_text_block`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`] && values[`option_${index}_link_text_block`][`option_${index}_link_text_input`].value) || existingData.linkText || ''
+            };
+            index++;
+          }
+
+          // Keep all options including blank ones so count is preserved
+          data.pollOptions = extractedOptions.join('\n');
+          data.enhancedOptions = enhancedOptions;
+        }
+
+        if (data.type === 'help') {
+          const extractedAlertChannels = getFormValue(values, 'alert_channels_block', 'alert_channels_select', 'conversations');
+          data.alertChannels = extractedAlertChannels || data.alertChannels || [];
+        }
+
+        formData.set(userId, data);
+        return createModal('preview', data);
+      })() });
+    } catch (error) {
+      console.error('Form submit redirect to preview error:', error);
+      await ack();
+    }
+    return;
+  }
+
+  if (callbackId === 'scheduler_schedule') {
     try {
       const userId = body.user.id;
       let data = formData.get(userId) || {};
